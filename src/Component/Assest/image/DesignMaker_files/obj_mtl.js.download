@@ -1,0 +1,80 @@
+/**
+ * @author Piyush Bang / piyush@infurnia.com
+ */
+
+THREE.OBJMTLLoader = function ( manager ) {
+
+	this.manager = ( manager !== undefined ) ? manager : THREE.DefaultLoadingManager;
+
+};
+
+THREE.OBJMTLLoader.prototype = {
+
+	constructor: THREE.OBJMTLLoader,
+
+	load: function ( url, mtlurl, onLoad, onProgress, onError ) {
+		var mtlLoader = new THREE.MTLLoader();
+		mtlLoader.setCrossOrigin( this.crossOrigin );
+		var glossCustom = this.glossCustom;
+		if(this.texture_path!=null)
+		{
+			mtlLoader.setTexturePath( this.texture_path );
+			this.texture_path = null;
+		}
+		else
+		{
+			mtlLoader.setTexturePath( url.substr( 0, url.lastIndexOf( "/" ) + 1 ) );
+		}
+		
+		mtlLoader.load( mtlurl, function( materials ) {
+			materialsCreator = materials;
+		    materialsCreator.preload();
+
+		    var objLoader = new THREE.OBJLoader();
+		    objLoader.setMaterials( materialsCreator );
+		    objLoader.load( url, function ( object ) {
+
+		    	object.traverse( function ( object ) {
+
+					if ( object instanceof THREE.Mesh ) {
+						object.geometry = new THREE.Geometry().fromBufferGeometry( object.geometry );
+						if(object.material.constructor.name=='Array'){
+							for(var i=0;i<object.material.length;i++){
+								var mat = object.material[i];
+								if (mat.name.indexOf('transparent') >=0) {
+									mat.transparent = true
+									mat.depthWrite = false								
+								}
+								if(!glossCustom) {
+									mat.shininess = 40;
+								}
+								else{
+									mat.shininess = 10;
+								}
+							}
+						}
+						else{
+							if (object.material.name.indexOf('transparent') >=0) {
+								object.material.transparent = true
+								object.material.depthWrite = false								
+							}
+							if(!glossCustom){
+								object.material.shininess = 40;
+							}
+							else{
+								object.material.shininess = 10;
+							}
+						}
+					}
+				} );
+		        onLoad( object );
+		    }, onProgress, onError );
+
+		},onProgress, onError);
+	},
+
+	setCrossOrigin: function ( value ) {
+		this.crossOrigin = value;
+	},
+};
+

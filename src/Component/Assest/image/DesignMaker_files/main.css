@@ -1,0 +1,6 @@
+.display_transition_delay {
+  -moz-transition: visibility .1s linear .5s;
+  -webkit-transition: visibility .1s linear .5s;
+  -o-transition: visibility .1s linear .5s;
+  transition: visibility .1s linear .5s;
+}

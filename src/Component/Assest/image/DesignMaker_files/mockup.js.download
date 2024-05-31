@@ -1,0 +1,683 @@
+/*
+Documentation:
+mockup = object of mockup schema
+user_images = array of images;
+image: {
+    id_123rf,
+    id_pixlr,
+    id_unsplash,
+    resource_id,
+    src,
+    cropDetails: {
+        id_123rf:'',
+        id_pixlr:'',
+        id_unsplash: '',
+        resource_id: '',
+        src: scope.image.src,
+        cropDetails: {
+            box_width_ratio: 1, //  box_width/image_width
+            box_height_ratio: 1 //  box_height/image_height
+            rotation: 0,
+            image_center: {x:0,y:0} //vertices in percent
+        }
+    }
+}
+params (all optional):{
+    maxWidth: Number,  //maximum possible width of output
+    maxHeight: Number, // maximum possible height of output
+    scaleDown: Number, //scaleDown factor relative to max quality possible
+    waterMark: Boolaen, // true or false whether to add watermark
+}
+
+*/
+
+var canvasDiv = document.createElement('div');
+var gl_scene = new THREE.Scene();
+var gl_renderer = new THREE.WebGLRenderer( { antialias:true,alpha:true,preserveDrawingBuffer: true } );
+gl_renderer.setClearColor( '#ff0000' );
+gl_renderer.setClearAlpha( 0 );
+gl_renderer.setSize( 1920, 1080 );
+canvasDiv.appendChild( gl_renderer.domElement );
+var gl_camera = new THREE.PerspectiveCamera(49.1, 1920/1080, 1, 200000 );
+var gl_light = new THREE.AmbientLight(0xffffff, 1 );
+gl_scene.add( gl_camera );
+gl_scene.add(gl_light);
+
+
+function visualizeDynamicLayer(mockup,inputs){
+    if(mockup.constructor.name == 'String'){
+        mockup = JSON.parse(mockup)
+    }
+    if(inputs.constructor.name == 'String'){
+        inputs = JSON.parse(inputs)
+    }
+
+    function getDynamicLayerIndex (layer,mockup){
+        var dynamic_index = 0;
+        for (var i = 0; i < mockup.layers.length; i++) {
+            if(mockup.layers[i] == layer){
+                return dynamic_index
+            }else if(mockup.layers[i].type == 'dynamic'){
+                dynamic_index += 1;
+            }
+        }
+
+        return -1
+    }
+
+    syncForEach(mockup.layers,function(layer){
+        if(layer.type == 'dynamic'){
+            return obj_mtl_loader(layer.obj_src,layer.mtl_src).then(function(object){
+                var texture_time = performance.now()
+                var user_image = inputs.user_images[getDynamicLayerIndex (layer,mockup)]
+                if(!user_image){
+                    return Promise.resolve(true);
+                }else{
+                    return applyTextureToObject(object,user_image,layer,mockup).then(function(object){
+                        return initializeVisualizationScene(object,layer)
+                    })
+                }   
+            }).catch(err => {
+                console.log(err);
+                return Promise.reject(err);
+            })
+        }else{
+            return Promise.resolve(true)
+        }
+    })
+}
+
+function initializeVisualizationScene(object,layer){
+    return new Promise(function(resolve,reject){
+        var camera_time = performance.now();
+        var three_image_time = performance.now()
+        object = object.clone();
+        object.castShadow = true;
+        object.receiveShadow = true;
+
+        var scene = new THREE.Scene();
+        scene.add( object );
+
+        object.traverse(function(node){
+            if(node.isMesh){
+                node.material.wireframe = true;
+                node.material.needsUpdate = true;
+            }
+        })
+
+        var renderer = new THREE.WebGLRenderer( { antialias:true,alpha:true,preserveDrawingBuffer: true } );
+        renderer.setClearColor( '#ff0000' );
+        renderer.setClearAlpha( 0 );
+        renderer.setSize( 768, 432 );
+        var canvas_div = document.createElement('div');
+        canvas_div.style.border = 'solid 1px black'
+        canvas_div.appendChild(renderer.domElement);
+        document.getElementById('visualizer_body').appendChild(canvas_div);
+
+        var camera = new THREE.PerspectiveCamera(49.1, 1920/1080, 1, 200000 );
+        var light = new THREE.DirectionalLight(0xffffff, 0.4);
+        var light2 = new THREE.AmbientLight(0xffffff, 0.6);
+        scene.add( camera );
+        scene.add(light,light2);
+
+        var target = new THREE.Vector3(layer.camera_target.x,layer.camera_target.y,layer.camera_target.z);
+        var cam_pos = new THREE.Vector3(layer.camera_position.x,layer.camera_position.y,layer.camera_position.z)
+
+        camera.position.set(cam_pos.x,cam_pos.y,cam_pos.z);
+        camera.lookAt(target)
+
+        light.position.set(target.x, target.y+1000, target.z);
+        
+        controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.enableKeys = false;
+        controls.minDistance = -Infinity;
+        controls.minZoom = -Infinity;
+        controls.maxDistance = Infinity;
+        controls.maxZoom = Infinity;
+        controls.screenSpacePanning = true;
+        controls.addEventListener( 'change', function() {
+            renderer.render(scene,camera)
+        })
+
+        renderer.render(scene,camera)
+
+        window.vis_scene = scene
+        window.vis_camera = camera
+        window.vis_controls = controls
+    }).catch(function(err){
+        console.log(err)
+        return Promise.reject(err);
+    })
+}
+
+function generateMockup(mockup,inputs,params){
+    try{
+        // console.log('Entered generateMockup function');
+
+        if(!mockup){
+            return Promise.resolve(document.createElement('canvas'));
+        }
+
+        if(!inputs){
+            inputs =  {
+                hue_values: [],
+                user_images: []
+            }
+        }
+
+        if(!params){
+            params = {}
+        }
+        var initial_time = performance.now();
+
+        if(mockup.constructor.name == 'String'){
+            mockup = JSON.parse(mockup)
+        }
+        if(inputs.constructor.name == 'String'){
+            inputs = JSON.parse(inputs)
+        }
+        if(params.constructor.name == 'String'){
+            params = JSON.parse(params)
+        }
+
+
+        //backward compatibility
+        if(inputs.user_image_srcs && !inputs.user_images){
+            inputs.user_images = inputs.user_image_srcs.map(function(o){
+                return {src: o}
+            })
+
+            delete inputs.user_image_srcs;
+        }
+        
+        mockup = JSON.parse(JSON.stringify(mockup))
+        if(params.scaleDown){
+            mockup.width /= params.scaleDown
+            mockup.height /= params.scaleDown
+        }
+
+        var aspect = mockup.width/mockup.height
+        if(params.maxWidth && mockup.width > params.maxWidth){
+            mockup.width = params.maxWidth
+            mockup.height = mockup.width/aspect
+        }
+
+        if(params.maxHeight && mockup.height > params.maxHeight){
+            mockup.width = params.maxWidth
+            mockup.height = mockup.width/aspect
+        }
+
+        var canvas = document.createElement('canvas')
+        canvas.width = mockup.width
+        canvas.height = mockup.height
+        // canvas.getContext('2d').scale(PIXEL_RATIO,PIXEL_RATIO)
+
+        var context = canvas.getContext('2d')
+        context.clearRect(0, 0, canvas.width, canvas.height);
+
+        inputs = JSON.parse(JSON.stringify(inputs))
+
+        var user_image_index = 0
+        ordered_layers = _.sortBy(mockup.layers,function(o){
+            return o.layer_index
+        })
+    }catch(err){
+        console.log(err);
+        return Promise.reject(err);
+    }
+    
+    return syncForEach(ordered_layers,function(layer){
+        return drawLayer(canvas,layer,mockup,inputs)
+    }).then(function(){
+        // if(params.waterMark){
+        //     return addWatermark(canva
+        //     +3---------s);
+        // }else{
+            return Promise.resolve(canvas);
+        // }
+    }).then(function(canvas){
+        // console.log('It took ' + ((performance.now()-initial_time)/1000) + ' seconds to generate the mockup')
+        if(performance.memory){
+            // console.log('totalJSHeapSize: '+performance.memory.totalJSHeapSize+' usedJSHeapSize: '+performance.memory.usedJSHeapSize+' jsHeapSizeLimit: '+performance.memory.jsHeapSizeLimit)
+        }
+        
+        return Promise.resolve(canvas)
+    }).catch(err => {
+        console.log(err);
+        return Promise.reject(err);
+    })
+}
+
+function loadObjectAndCreateImage(layer,mockup,user_image){
+    var obj_loader_time = performance.now()
+    return obj_mtl_loader(layer.obj_src,layer.mtl_src).then(function(object){
+        // console.log('   It took ' + ((performance.now()-obj_loader_time)/1000) + ' to load the obj and mtl file')
+        var texture_time = performance.now()
+        return applyTextureToObject(object,user_image,layer,mockup).then(function(object){
+            // console.log('   It took ' + ((performance.now()-texture_time)/1000) + ' to apply the image as texture on the 3d mesh')
+            return createThreeImageWithObject(object,layer,mockup)
+        })
+    }).catch(err => {
+        console.log(err);
+        return Promise.reject(err);
+    })
+}
+
+function applyTextureToObject(object,user_image,layer,mockup){
+    return new Promise(function(resolve,reject){
+        try{
+            var loader = new THREE.TextureLoader()
+            var final_src;
+
+            loadUserImage(user_image)
+            .then(function(src){
+                if(src.indexOf('data:image')>-1){
+                    final_src = src
+                }else{
+                    final_src = server_path+src
+                }
+                loader.load(final_src,function(texture){
+                    // texture.image.width = mockup.width*layer.width/100
+                    // texture.image.height = mockup.height*layer.height/100
+                    object.children[0].material.map = texture
+                    object.children[0].material.map.needsUpdate = true;
+                    object.children[0].geometry.uvsNeedUpdate = true;
+                    object.children[0].geometry.elementsNeedUpdate = true;
+                    resolve(object)
+                }) 
+            })
+        }catch(err){
+            console.log(err);
+            return reject(err)
+        }
+    }).catch(function(err){
+        console.log(err)
+        return Promise.reject(err);
+    })
+}
+
+function drawLayer(canvas,layer,mockup,inputs){
+    try{
+        function getHueLayerIndex (layer,mockup){
+            var hue_index = 0;
+            for (var i = 0; i < mockup.layers.length; i++) {
+                if(mockup.layers[i] == layer){
+                    return hue_index
+                }else if(mockup.layers[i].features && mockup.layers[i].features.hue){
+                    hue_index += 1;
+                }
+            }
+        }
+
+        function getDynamicLayerIndex (layer,mockup){
+            var dynamic_index = 0;
+            for (var i = 0; i < mockup.layers.length; i++) {
+                if(mockup.layers[i] == layer){
+                    return dynamic_index
+                }else if(mockup.layers[i].type == 'dynamic'){
+                    dynamic_index += 1;
+                }
+            }
+
+            return -1
+        }
+
+        if(layer.type == 'dynamic'){
+            var index = getDynamicLayerIndex(layer,mockup);
+            if(index==-1 || !inputs.user_images[index]){
+                return Promise.resolve();
+            }
+
+            var dynamic_time = performance.now();
+            return loadObjectAndCreateImage(layer,mockup,inputs.user_images[index])
+            .then(function(output){
+                // console.log('It took ' + ((performance.now()-dynamic_time)/1000) + ' seconds to load dynamic 3d image')
+                var blend_time = performance.now();
+                return blendLayers(canvas,output,layer,mockup).then(function(imageData){
+                    // console.log('It took ' + ((performance.now()-blend_time)/1000) + ' seconds to blend the dynamic 3d image')
+                    try{
+                        var canvas_temp = document.createElement('canvas');
+                        var context = canvas_temp.getContext('2d');
+                        canvas_temp.width = imageData.width;
+                        canvas_temp.height = imageData.height;
+                        context.putImageData(imageData, 0, 0);
+
+                        if(layer.features.hue && inputs.hue_values){
+                            var color_time = performance.now();
+                            var index = getHueLayerIndex(layer,mockup);
+
+                            if(index!=-1 && inputs.hue_values[index]){
+                                var hue = inputs.hue_values[index]
+                                utils.setLayerHue(canvas_temp,hue)
+                                // console.log('It took ' + ((performance.now()-color_time)/1000) + ' seconds to change color')
+                            }
+                        }
+                    }catch(err){
+                        console.log(err);
+                        return Promise.reject(err)
+                    }
+                    return printLayerImage(canvas,layer,canvas_temp)
+                })
+            }).catch(function(err){
+                console.log(err)
+                return Promise.reject(err);
+            })
+        }else{
+            return loadStaticImage(layer.image_src)
+            .then(function(image){
+                try{
+                    layer.loaded_image = image
+                    var canvas_temp = document.createElement('canvas');
+                    var context = canvas_temp.getContext('2d');
+                    canvas_temp.width = canvas.width*layer.width/100;
+                    canvas_temp.height = canvas.height*layer.height/100;
+
+                    context.drawImage(image, 0, 0,canvas_temp.width,canvas_temp.height);
+                    if(layer.features.hue && inputs.hue_values){
+                        var color_time = performance.now();
+                        var index = getHueLayerIndex(layer,mockup);
+
+                        if(index!=-1 && inputs.hue_values[index]){
+                            var hue = inputs.hue_values[index]
+                            utils.setLayerHue(canvas_temp,hue)
+                            // console.log('It took ' + ((performance.now()-color_time)/1000) + ' seconds to change color')
+                        }
+                    }
+                }catch(err){
+                    console.log(err);
+                    return Promise.reject(err)
+                }
+                return printLayerImage(canvas,layer,canvas_temp)
+            }).catch(function(err){
+                console.log(err)
+                return Promise.reject(err);
+            })
+        }
+
+        function printLayerImage(canvas,layer,print_object){
+            try{
+                var context = canvas.getContext('2d');
+                context.globalAlpha = layer.opacity==undefined?1:layer.opacity;
+                context.drawImage(print_object,canvas.width*layer.position.x/100,canvas.height*layer.position.y/100,canvas.width*layer.width/100,canvas.height*layer.height/100);
+                // context.clearRect(0, 0, canvas.width, canvas.height);
+                // context.drawImage(print_object,0,0,canvas.width,canvas.height);
+            }catch(err){
+                console.log(err);
+                return Promise.reject(true);
+            }
+
+            return Promise.resolve(true);
+        }
+    }catch(err){
+        console.log(err);
+        return Promise.reject(err);
+    }
+}
+
+function createThreeImageWithObject(object,layer,mockup,view,camera_type){
+    return new Promise(function(resolve,reject){
+        var camera_time = performance.now();
+        var three_image_time = performance.now()
+        object = object.clone();
+
+        // var scene_temp = new THREE.Scene();
+        gl_scene.add( object );
+
+        gl_renderer.setSize( 1920, 1080 );
+
+
+        var width = layer.width*mockup.width/100
+        var height = layer.height*mockup.height/100
+
+        bbox = new THREE.Box3().setFromObject(object)
+
+        var target = new THREE.Vector3(layer.camera_target.x,layer.camera_target.y,layer.camera_target.z);
+
+        var cam_pos = new THREE.Vector3(layer.camera_position.x,layer.camera_position.y,layer.camera_position.z)
+
+        var aspect = width / height;
+
+        gl_camera.position.set(cam_pos.x,cam_pos.y,cam_pos.z);
+        gl_camera.lookAt(target)
+        // console.log('       It took ' + ((performance.now()-camera_time)/1000) + ' to setup camera')
+
+        var light_time = performance.now();
+        gl_light.position.set(target.x, target.y+1000, target.z);
+        // console.log('       It took ' + ((performance.now()-light_time)/1000) + ' to setup lights')
+
+
+        var renderer_time = performance.now();
+
+        var plane1 = new THREE.Plane().setFromCoplanarPoints(
+            new THREE.Vector3(bbox.min.x,0,0),
+            new THREE.Vector3(bbox.min.x,10,0),
+            new THREE.Vector3(bbox.min.x,10,10)
+        )
+
+        var plane2 = new THREE.Plane().setFromCoplanarPoints(
+            new THREE.Vector3(bbox.max.x,0,0),
+            new THREE.Vector3(bbox.max.x,10,0),
+            new THREE.Vector3(bbox.max.x,10,-10)
+        )
+
+        gl_renderer.clippingPlanes = [plane1,plane2]
+       
+        // console.log('       It took ' + ((performance.now()-renderer_time)/1000) + ' to setup the three renderer')
+
+        var bounds_time = performance.now();
+        var bounds = [];
+
+        var clone_geom = new THREE.Geometry();
+        outerGeometry(clone_geom,object)
+
+
+        clone_geom.vertices.map(function(o){
+            bounds.push(worldToScreen(o,gl_camera, canvasDiv.children[0].width, canvasDiv.children[0].height))
+        })
+
+        clone_geom = undefined;
+        // console.log('       It took ' + ((performance.now()-bounds_time)/1000) + ' to calculate projection bounds')
+
+        var adjustment_time = performance.now();
+        var minX = _.minBy(bounds,function(o){return o.x}).x
+        var maxX = _.maxBy(bounds,function(o){return o.x}).x
+
+        var minY = _.minBy(bounds,function(o){return o.y}).y
+        var maxY = _.maxBy(bounds,function(o){return o.y}).y
+
+
+        var crop_top_left = {x:minX,y:minY}
+        var crop_width = maxX - minX
+        var crop_height = maxY - minY
+
+        var scaleup = Math.max(width/crop_width,height/crop_height)
+        crop_top_left.x *= scaleup
+        crop_top_left.y *= scaleup
+        crop_width *= scaleup
+        crop_height *= scaleup
+
+        crop_top_left.x = Math.floor(crop_top_left.x)+1;
+        crop_top_left.y = Math.floor(crop_top_left.y)+1;
+        crop_width = Math.floor(crop_width)-1;
+        crop_height = Math.floor(crop_height)-1;
+
+        gl_renderer.setSize( Math.floor(1920*scaleup), Math.floor(1080*scaleup));
+        gl_camera.updateProjectionMatrix();
+        // console.log('       It took ' + ((performance.now()-adjustment_time)/1000) + ' to re adjust renderer size')
+
+        var render_time = performance.now();
+        gl_renderer.render(gl_scene,gl_camera)
+        // console.log('       It took ' + ((performance.now()-render_time)/1000) + ' to render the scene')
+
+        var new_size = gl_renderer.getSize()
+        var read_time = performance.now();
+        var gl = gl_renderer.getContext()
+        var pixelData = new Uint8Array(new_size.width * new_size.height * 4);
+        gl.readPixels(0, 0, new_size.width, new_size.height, gl.RGBA, gl.UNSIGNED_BYTE, pixelData);
+        pixelData = new ImageData(new Uint8ClampedArray(pixelData),new_size.width,new_size.height)
+        // console.log('       It took ' + ((performance.now()-read_time)/1000) + ' to get gl pixel data')
+        
+        var rect_roi_time = performance.now();
+        var data = imageRectROI(pixelData,{x:crop_top_left.x,y:new_size.height-crop_top_left.y-crop_height},crop_width,crop_height);
+        // console.log('       It took ' + ((performance.now()-rect_roi_time)/1000) + ' to take rect roi')
+
+        var mirror_time = performance.now();
+        data = yAxisMirror(data);
+        // console.log('       It took ' + ((performance.now()-mirror_time)/1000) + ' to get take y axis mirror')
+
+        var apply_time = performance.now();
+        var canvas_temp = document.createElement('canvas');
+        var context = canvas_temp.getContext('2d');
+        canvas_temp.width = data.width;
+        canvas_temp.height = data.height;
+
+        context.putImageData(data,0,0)
+        var canvas_temp2 = document.createElement('canvas');
+        var context = canvas_temp2.getContext('2d');
+        canvas_temp2.width = width;
+        canvas_temp2.height = height;
+        context.drawImage(canvas_temp,0,0,canvas_temp2.width,canvas_temp2.height)
+
+        
+
+        gl_scene.remove(object)
+        // var elem = gl_renderer.domElement.parentElement
+        // while(elem.lastChild){
+        //     elem.removeChild(elem.lastChild);
+        // }
+        // gl_renderer.domElement.parentElement.removeChild(gl_renderer.domElement)
+        canvas_temp.remove()
+        canvas_temp = null;gl = null;pixelData = null;data = null;
+        // console.log('       It took ' + ((performance.now()-apply_time)/1000) + ' to apply rect roi on canvas')
+        // console.log('   It took ' + ((performance.now()-three_image_time)/1000) + ' to take snap three image')
+        resolve(canvas_temp2)
+    }).catch(function(err){
+        console.log(err)
+        return Promise.reject(err);
+    })
+}
+
+function blendLayers(sourceCanvas,targetCanvas,targetLayer,mockup){
+    return new Promise(function(resolve,reject){
+        var sourceData = sourceCanvas.getContext('2d').getImageData(0, 0, sourceCanvas.width, sourceCanvas.height);
+        var targetData = targetCanvas.getContext('2d').getImageData(0, 0, targetCanvas.width, targetCanvas.height);
+        var source_roi = imageRectROI(sourceData,
+            {   x:targetLayer.position.x*mockup.width/100,
+                y:targetLayer.position.y*mockup.height/100
+            },targetLayer.width*mockup.width/100,targetLayer.height*mockup.height/100)
+
+        if(source_roi.width == targetData.width && source_roi.height == targetData.height){
+            var out = lightMapBlend(source_roi,targetData,targetLayer.blend_alpha==undefined?0:targetLayer.blend_alpha)
+            resolve(out)
+            // resolve(targetData)
+        }else{
+            console.log('images are not the same size')
+        }
+    }).catch(function(err){
+        console.log(err)
+        return Promise.reject(err);
+    })
+}
+
+
+loadUserImage = function(user_image,design_save_id){
+    return new Promise(function(resolve,reject){
+        if(user_image.id_123rf){
+            fetch(server_path + 'design_resource/load_123rf_resource', {method: 'POST','credentials': 'include',headers: {'Content-Type':'application/json'}, body:JSON.stringify({id:user_image.id_123rf,design_id:design_save_id,quality:'m'})})
+            .then(function(resp) {
+                resp.json().then(function(data) {
+                    if(data.response_code == 1){
+                        var src = data.data.src
+                        finishLoadUserImage(user_image,src,resolve)
+                    }
+                })
+            })
+        }else if(user_image.id_123rf_plus){
+            fetch(server_path + 'design_resource/load_123rf_plus_resource', {method: 'POST','credentials': 'include',headers: {'Content-Type':'application/json'}, body:JSON.stringify({id:user_image.id_123rf_plus,design_id:design_save_id,quality:'m'})})
+            .then(function(resp) {
+                resp.json().then(function(data) {
+                    if(data.response_code == 1){
+                        var src = data.data.src
+                        finishLoadUserImage(user_image,src,resolve)
+                    }
+                })
+            })
+        }else if(user_image.id_pixlr){
+            fetch(server_path + 'design_resource/load_pixlr_resource', {method: 'POST','credentials': 'include',headers: {'Content-Type':'application/json'}, body:JSON.stringify({id:user_image.id_pixlr,design_id:design_save_id,quality:'m'})})
+            .then(function(resp) {
+                resp.json().then(function(data) {
+                    if(data.response_code == 1){
+                        var src = data.data.src
+                        finishLoadUserImage(user_image,src,resolve)
+                    }
+                })
+            })
+        }else if(user_image.id_unsplash){
+            fetch(server_path + 'design_resource/load_unsplash_resource', {method: 'POST','credentials': 'include',headers: {'Content-Type':'application/json'}, body:JSON.stringify({id:user_image.id_unsplash,design_id:design_save_id,quality:'m'})})
+            .then(function(resp) {
+                resp.json().then(function(data) {
+                    if(data.response_code == 1){
+                        var src = data.data.src
+                        finishLoadUserImage(user_image,src,resolve)
+                    }
+                    else {
+                        window.alert('Unsplash API Limit exhausted!')
+                    }
+                })
+            })
+        }else if(user_image.resource_id){
+            fetch(server_path + 'design_resource/load_design_resource', {method: 'POST','credentials': 'include',headers: {'Content-Type':'application/json'}, body:JSON.stringify({id:user_image.resource_id,design_id:design_save_id,quality:'m'})})
+            .then(function(resp){
+                resp.json().then(function(data) {
+                    if(data.response_code == 1){
+                        var src = data.data.src
+                        finishLoadUserImage(user_image,src,resolve)
+                    }
+                })
+            })
+        }else{
+            var src = user_image.src
+            finishLoadUserImage(user_image,src,resolve)
+        }
+    })
+}
+
+finishLoadUserImage = function(user_image,src,resolve){
+    loadStaticImage(src).then(function(image_raw) {
+        userImageCrop(user_image,image_raw)
+        .then(function(src){
+            resolve(src)
+        })
+    }).catch(function(err) {
+        console.log(err)
+    })
+}
+
+this.userImageCrop = function(user_image,image_raw){
+    if(!user_image.cropDetails){
+        user_image.cropDetails = {
+            box_width_ratio: 1,
+            box_height_ratio: 1,
+            rotation: 0,
+            image_center: {x:0,y:0}
+        }
+    }
+
+    var box_canvas = document.createElement('canvas');
+    box_canvas.width = user_image.cropDetails.box_width_ratio*image_raw.width;
+    box_canvas.height = user_image.cropDetails.box_height_ratio*image_raw.height;
+
+    var image_center = {
+        x: user_image.cropDetails.image_center.x*box_canvas.width/100,
+        y: user_image.cropDetails.image_center.y*box_canvas.height/100
+    }
+
+    var context = box_canvas.getContext('2d')
+
+    context.save();
+    context.translate(image_center.x,image_center.y)
+    context.rotate(user_image.cropDetails.rotation);
+    context.drawImage(image_raw,-image_raw.width/2,-image_raw.height/2, image_raw.width, image_raw.height);
+
+    return Promise.resolve(box_canvas.toDataURL());
+}

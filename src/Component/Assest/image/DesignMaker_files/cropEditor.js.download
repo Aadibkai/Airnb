@@ -1,0 +1,451 @@
+/*
+Documentation:
+image = image to be cropped, must be an instance of HTML img element
+aspect = the desired aspect ratio to be cropped into
+dom = the div container to contain the crop editor UI
+*/
+
+function cropEditor(image,aspect,dom,previous_cropDetails){
+	this.image = image
+	this.dom = dom
+	this.canvas = null;
+	this.aspect = aspect
+
+	this.rotation = 0;
+
+	var scope = this;
+
+	var max_width = 800;
+
+	scope.image_width = image.width
+	scope.image_height = image.height
+
+	if(scope.image_width>max_width){
+		scope.image_height = max_width*scope.image_height/scope.image_width
+		scope.image_width = max_width
+	}else if(scope.image_height>max_width){
+		scope.image_width = max_width*scope.image_width/scope.image_height
+		scope.image_height = max_width
+	}
+
+	if(dom.parentElement){
+		$(dom.parentElement).contextmenu(function(o){
+			o.preventDefault();
+		});
+	}
+
+	this.activeElement = null;
+	this.selection = null;
+	var initialMouseX = null;
+	var initialMouseY = null;
+	var mouseX = null;
+	var mouseY = null;
+	var rawMouseX = null;
+	var rawMouseY = null;
+	var lastMouseX = null;
+	var lastMouseY = null;
+	this.originX = 0;
+	this.originY = 0;
+
+	var leftClick = false;
+	var rightClick = false;
+	var mouseDown = false;
+
+	var pixelsPerCm = 1; //original value was 25.0
+	var basePixelsPerCm = 1
+	var cmPerPixel = 1.0 / pixelsPerCm;
+
+	function init(){
+		scope.dom.innerHTML = ''
+		var canvas = document.createElement('canvas')
+		$(window).resize(scope.handleWindowResize);
+		$(scope.dom).append(canvas);
+		scope.canvas = canvas
+		scope.activateController();
+		scope.handleWindowResize();
+		if(previous_cropDetails){
+			scope.rotation = previous_cropDetails.rotation;
+			var box_width = previous_cropDetails.box_width_ratio*scope.image_width;
+			var box_height = previous_cropDetails.box_height_ratio*scope.image_height;
+
+
+			var center = {x:scope.image_width/2,y:scope.image_height/2}
+
+			scope.setView(
+				center,
+				1.25*box_width,1.25*box_height,0
+			)
+
+			var image_center = {
+				x: 0.1*scope.canvas.width,
+				y: 0.1*scope.canvas.height
+			}
+
+			image_center.x += (previous_cropDetails.image_center.x*0.8*scope.canvas.width/100);
+			image_center.y += (previous_cropDetails.image_center.y*0.8*scope.canvas.height/100);
+
+			var standard_center = {
+				x: scope.canvas.width/2,
+				y: scope.canvas.height/2
+			}
+
+			image_center.x -= standard_center.x;
+			image_center.y -= standard_center.y;
+
+			image_center.x = scope.convertPixelToCm(image_center.x);
+			image_center.y = scope.convertPixelToCm(image_center.y);
+
+			var center = {x:scope.image_width/2,y:scope.image_height/2}
+			center.x -= image_center.x;
+			center.y -= image_center.y;
+
+			setCenterAt(center.x,center.y)
+		}else{
+			scope.setView(
+				{x:scope.image_width/2,y:scope.image_height/2},
+				1.25*scope.image_width,1.25*scope.image_height,0
+			)
+		}
+			
+
+		basePixelsPerCm = pixelsPerCm
+	}
+
+	this.init = init
+
+	this.fitToScreen = function(){
+		scope.setView(
+			{x:scope.image_width/2,y:scope.image_height/2},
+			1.25*scope.image_width,1.25*scope.image_height,0
+		)
+	}
+
+	this.zoomToScreen = function(){
+		if(scope.aspect>(scope.image_width/scope.image_height)){
+			scope.setView(
+				{x:scope.image_width/2,y:scope.image_height/2},
+				1.25*scope.image_width,0,0
+			)
+		}else{
+			scope.setView(
+				{x:scope.image_width/2,y:scope.image_height/2},
+				0,1.25*scope.image_height,0
+			)
+		}
+			
+	}
+
+
+	this.activateController = function(){
+		$(scope.canvas).off();
+		$(scope.canvas).mousedown(mouseDownControl)
+		$(scope.canvas).mouseup(mouseUpControl)
+		$(scope.canvas).mousemove(mouseMoveControl)
+		scope.canvas.addEventListener("touchstart",mouseDownControl);
+		scope.canvas.addEventListener("touchend",mouseUpControl);
+		scope.canvas.addEventListener("touchmove",mouseMoveControl);
+
+		function mouseDownControl(event){
+			event.preventDefault();
+			event.stopPropagation();
+			mouseDown = true;
+			if(event.type == "touchstart"){
+				rawMouseX = event.touches[0].pageX;
+				rawMouseY = event.touches[0].pageY;
+
+				mouseX = (event.touches[0].pageX - $(scope.canvas).offset().left) * cmPerPixel + scope.originX * cmPerPixel;
+				mouseY = (event.touches[0].pageY - $(scope.canvas).offset().top) * cmPerPixel + scope.originY * cmPerPixel;
+			}else{
+				rawMouseX = event.clientX;
+				rawMouseY = event.clientY;
+
+				mouseX = (event.clientX - $(scope.canvas).offset().left) * cmPerPixel + scope.originX * cmPerPixel;
+				mouseY = (event.clientY - $(scope.canvas).offset().top) * cmPerPixel + scope.originY * cmPerPixel;
+			}
+
+			lastX = rawMouseX;
+			lastY = rawMouseY; 
+
+			if(event.which == 3 || event.button == 2){
+				rightClick = true;
+				leftClick = false;
+			}else if(event.which == 1 || event.button == 0){
+				rightClick = false;
+				leftClick = true;
+			}
+			mouseDown = true;
+			initialMouseX = mouseX;
+			initialMouseY = mouseY;
+		}
+
+		function mouseUpControl(event){
+			mouseDown = false;
+		}
+
+		function mouseMoveControl(event){
+			// update mouse
+			if(event.type == "touchmove"){
+				rawMouseX = event.touches[0].pageX;
+				rawMouseY = event.touches[0].pageY;
+
+				mouseX = (event.touches[0].pageX - $(scope.canvas).offset().left) * cmPerPixel + scope.originX * cmPerPixel;
+				mouseY = (event.touches[0].pageY - $(scope.canvas).offset().top) * cmPerPixel + scope.originY * cmPerPixel;
+			}else{
+				rawMouseX = event.clientX;
+				rawMouseY = event.clientY;
+
+				mouseX = (event.clientX - $(scope.canvas).offset().left) * cmPerPixel + scope.originX * cmPerPixel;
+				mouseY = (event.clientY - $(scope.canvas).offset().top) * cmPerPixel + scope.originY * cmPerPixel;
+			}
+
+			// panning
+			if (mouseDown) {
+				scope.originX += (lastX - rawMouseX);
+				scope.originY += (lastY - rawMouseY);
+				lastX = rawMouseX;
+				lastY = rawMouseY;
+			}
+
+
+			lastX = rawMouseX;
+			lastY = rawMouseY; 
+
+			lastMouseX = mouseX;
+			lastMouseY = mouseY; 
+
+			scope.draw();
+		}
+	}
+
+	this.zoom = function(value){
+		//value is from 1 to 100
+		var centerX = scope.canvas.width / 2;
+		var centerY = scope.canvas.height / 2;
+		var new_x = (centerX) * cmPerPixel + scope.originX * cmPerPixel;
+		var new_y = (centerY) * cmPerPixel + scope.originY * cmPerPixel;
+		var diff = (Number(value)-50)/50
+
+		pixelsPerCm = basePixelsPerCm*Math.pow(6,diff)
+		scope.updateScale();
+		setCenterAt(new_x,new_y);
+		scope.draw();
+	}
+
+	
+
+	this.exportCrop = function(){
+		// scope.handleWindowResize(true)
+		// scope.draw(true);
+		// var imageData = scope.canvas.getContext('2d').getImageData((0.1*scope.canvas.width)+1, (0.1*scope.canvas.height)+1, (0.8*scope.canvas.width)-1, (0.8*scope.canvas.height)-1);
+		// var canvas_temp = document.createElement('canvas');
+		// var context = canvas_temp.getContext('2d');
+		// canvas_temp.width = imageData.width;
+		// canvas_temp.height = imageData.height;
+		// context.putImageData(imageData, 0, 0);
+		// scope.handleWindowResize()
+		// scope.draw();
+
+		// return canvas_temp.toDataURL();
+
+
+  		var image_width_in_pixel = scope.convertCmToPixel(scope.image_width);
+		var image_height_in_pixel = scope.convertCmToPixel(scope.image_height);
+
+		var box_width_in_pixel = 0.8*scope.canvas.width;
+		var box_height_in_pixel = 0.8*scope.canvas.height;
+
+  		var image_center = {
+  			x: scope.convertX(0) + image_width_in_pixel/2,
+  			y: scope.convertY(0) + image_height_in_pixel/2
+  		}
+
+  		var top_left_start = {
+  			x: 0.1*scope.canvas.width,
+  			y: 0.1*scope.canvas.height,
+  		}
+
+  		image_center.x -= top_left_start.x
+  		image_center.y -= top_left_start.y;
+
+  		image_center.x = ((image_center.x/box_width_in_pixel)*100);
+  		image_center.y = ((image_center.y/box_height_in_pixel)*100);
+
+  		var cropDetails = {
+			box_width_ratio: box_width_in_pixel/image_width_in_pixel,
+			box_height_ratio: box_height_in_pixel/image_height_in_pixel,
+			rotation: scope.rotation,
+			image_center: image_center
+  		}
+  		
+        return cropDetails
+	}
+
+	this.draw = function(transparent_backdrop){
+		function drawCircle(centerX,centerY,radius,fill,fillColor,stroke,strokeColor,strokeWidth){
+			context.beginPath();
+			context.arc(centerX, centerY, radius, 0, 2 * Math.PI, false);
+			if(fill){
+				context.fillStyle = fillColor;
+				context.fill();
+			}
+			if(stroke){
+				context.lineWidth = strokeWidth;
+				context.strokeStyle = strokeColor;
+				context.stroke();
+			}
+		}
+		
+		var context = scope.canvas.getContext('2d')
+		var canvas = scope.canvas
+		context.clearRect(0, 0, scope.canvas.width, scope.canvas.height);
+		if(transparent_backdrop){
+			context.fillStyle = 'rgba(0,0,0,0)'
+		}else{
+			context.fillStyle = '#aaaaaa'
+		}
+		context.fillRect(0, 0, scope.canvas.width, scope.canvas.height);
+
+		var image_width_in_pixel = scope.convertCmToPixel(scope.image_width);
+		var image_height_in_pixel = scope.convertCmToPixel(scope.image_height);
+
+		context.save();
+		context.translate( scope.convertX(0) + (image_width_in_pixel/2),scope.convertY(0) + (image_height_in_pixel/2))
+		context.rotate(scope.rotation);
+		context.drawImage(scope.image,-image_width_in_pixel/2,-image_height_in_pixel/2, image_width_in_pixel, image_height_in_pixel);
+		context.restore();
+
+		context.fillStyle = 'rgba(0,0,0,0.8)'
+		context.beginPath();
+		context.moveTo(0,0)
+		context.lineTo(scope.canvas.width,0)
+		context.lineTo(scope.canvas.width,scope.canvas.height)
+		context.lineTo(0,scope.canvas.height)
+		context.lineTo(0,0)
+		context.moveTo(0.1*scope.canvas.width,0.1*scope.canvas.height)
+		context.lineTo(0.1*scope.canvas.width,0.9*scope.canvas.height)
+		context.lineTo(0.9*scope.canvas.width,0.9*scope.canvas.height)
+		context.lineTo(0.9*scope.canvas.width,0.1*scope.canvas.height)
+		context.lineTo(0.1*scope.canvas.width,0.1*scope.canvas.height)
+		context.fill();
+
+		if(!transparent_backdrop){
+			context.setLineDash([6,6])
+			context.strokeStyle = '#a6a6a6'
+			context.lineWidth = 1
+			context.beginPath();
+			context.moveTo(0.1*scope.canvas.width-1,0.1*scope.canvas.height-1)
+			context.lineTo(0.1*scope.canvas.width-1,0.9*scope.canvas.height+1)
+			context.lineTo(0.9*scope.canvas.width+1,0.9*scope.canvas.height+1)
+			context.lineTo(0.9*scope.canvas.width+1,0.1*scope.canvas.height-1)
+			context.lineTo(0.1*scope.canvas.width-1,0.1*scope.canvas.height-1)
+			context.stroke();
+		}
+
+	}
+
+
+	this.convertX = function(x) {
+		return (x - scope.originX * cmPerPixel) * pixelsPerCm;
+	}
+
+	this.convertY = function(y) {
+		return (y - scope.originY * cmPerPixel) * pixelsPerCm;
+	}
+
+	this.convertXPixel = function(x) {
+		return (scope.originX * cmPerPixel) + (x/pixelsPerCm);
+	}
+	
+	this.convertYPixel = function(y) {
+		return (scope.originY * cmPerPixel) + (y/pixelsPerCm);
+	}
+
+
+	this.convertCmToPixel = function(a){
+		return a*pixelsPerCm;
+	}
+
+	this.convertPixelToCm = function(a){
+		return a*cmPerPixel;
+	}
+
+	this.captureView = function(){
+		var capture = {};
+		var inner_width = scope.canvas.width;
+		var inner_height = scope.canvas.height;
+		var centerX = inner_width / 2.0;
+		var centerY = inner_height / 2.0;
+
+		capture.center = {
+			x:(scope.originX + centerX)/pixelsPerCm,
+			y:(scope.originY + centerY)/pixelsPerCm
+		}
+
+		capture.width = inner_width/pixelsPerCm;
+		capture.height = inner_height/pixelsPerCm;
+		capture.offsetPercent = 0
+
+		return capture
+	}
+
+
+	this.setView = function(center,width,height,offsetPercent){
+		if(offsetPercent == undefined){
+			offsetPercent = 0;
+		}
+		var inner_width = scope.canvas.width;
+		var inner_height = scope.canvas.height;
+		
+		var centerX = inner_width / 2;
+		var centerY = inner_height / 2;
+
+		// var centerFloorplan = floorplan.getCenter();
+		var widthRatio = inner_width / width; 
+		var heightRatio = inner_height / height;
+
+		if(widthRatio<heightRatio){
+			pixelsPerCm = inner_width/(width*0.01*(100+offsetPercent));
+			scope.updateScale();
+		}else {
+			pixelsPerCm = inner_height/(height*0.01*(100+offsetPercent));
+			scope.updateScale();
+		}
+		
+		scope.originX = (center.x )* pixelsPerCm - centerX;
+		scope.originY = (center.y) * pixelsPerCm - centerY;
+		scope.draw();
+	}
+
+	this.updateScale = function(){
+		cmPerPixel = 1/pixelsPerCm
+	}
+
+	function setCenterAt(x,y){
+		var centerX = scope.canvas.width/2;
+		var centerY = scope.canvas.height/2;
+		scope.originX = x * pixelsPerCm - centerX;
+		scope.originY = y * pixelsPerCm - centerY;
+		scope.draw();
+	}
+
+	this.handleWindowResize = function(take_max_width) {
+		var capture = scope.captureView();
+		var base_width
+		var available_height = Math.floor(window.innerHeight)
+		if(scope.dom.parentElement && take_max_width!=true){
+			base_width = Math.floor(scope.dom.parentElement.clientWidth*0.95)
+			if(base_width*(1/scope.aspect) > 0.8*available_height){
+				base_width = 0.6*available_height*scope.aspect
+			}
+		}else{
+			base_width = Math.max(scope.image.width,scope.image.height);
+		}
+		scope.canvas.style.width = base_width+'px'
+		scope.canvas.style.height = (1/scope.aspect)*base_width + 'px'
+		scope.canvas.width = base_width
+		scope.canvas.height = (1/scope.aspect)*base_width
+		scope.setView(capture.center,capture.width,capture.height,capture.offsetPercent)
+	}
+
+	init();
+}

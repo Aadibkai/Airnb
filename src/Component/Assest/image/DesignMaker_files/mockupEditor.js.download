@@ -1,0 +1,499 @@
+function mockupEditor(mockup,dom){
+	this.mockup = mockup
+	this.dom = dom
+	this.canvas = null;
+
+	var scope = this;
+
+	var max_width = 1400;
+
+	scope.mockup_width = mockup.width
+	scope.mockup_height = mockup.height
+
+	if(scope.mockup_width>1400){
+		scope.mockup_height = 1400*scope.mockup_height/scope.mockup_width
+		scope.mockup_width = 1400
+	}
+
+	if(dom.parentElement){
+		$(dom.parentElement).contextmenu(function(o){
+			o.preventDefault();
+		});
+	}
+
+	this.activeElement = null;
+	this.selection = null;
+	var initialMouseX = null;
+	var initialMouseY = null;
+	var mouseX = null;
+	var mouseY = null;
+	var lastMouseX = null;
+	var lastMouseY = null;
+	this.originX = 0;
+	this.originY = 0;
+
+	var leftClick = false;
+	var rightClick = false;
+	var mouseDown = false;
+
+	var pixelsPerCm = 1; //original value was 25.0
+	var cmPerPixel = 1.0 / pixelsPerCm;
+
+	function init(){
+		if(scope.mockup.tracing_image_src){
+			loadStaticImage(scope.mockup.tracing_image_src).then(function(img){
+				scope.loaded_tracing_image = img
+				continueInit();
+			})
+		}else{
+			continueInit();
+		}
+
+		function continueInit(){
+			scope.dom.innerHTML = ''
+			var canvas = document.createElement('canvas')
+			$(window).resize(scope.handleWindowResize);
+			$(scope.dom).append(canvas);
+			scope.canvas = canvas
+			scope.activateController();
+			scope.handleWindowResize();
+			scope.setView(
+				{x:scope.convertPercentToCmX(50),y:scope.convertPercentToCmY(50)},
+				scope.convertPercentToCmX(100),scope.convertPercentToCmY(100),5
+			)
+		}
+	}
+
+
+	this.activateController = function(){
+		$(scope.canvas).off();
+		$(scope.canvas).mousedown(mouseDownControl)
+		$(scope.canvas).mouseup(mouseUpControl)
+		$(scope.canvas).mousemove(mouseMoveControl)
+		$(scope.canvas).mouseleave(mouseLeave)
+		scope.canvas.addEventListener("mousewheel", mouseScroll);
+
+		function mouseDownControl(event){
+			event.preventDefault();
+			event.stopPropagation();
+			mouseDown = true;
+			if(event.which == 3 || event.button == 2){
+				rightClick = true;
+				leftClick = false;
+			}else if(event.which == 1 || event.button == 0){
+				rightClick = false;
+				leftClick = true;
+			}
+			mouseDown = true;
+			initialMouseX = mouseX;
+			initialMouseY = mouseY;
+		}
+
+		function mouseLeave(event){
+			mouseDown = false;
+			scope.activeElement = null
+			scope.draw();
+		}
+
+		function mouseUpControl(event){
+			mouseDown = false;
+			scope.findActiveElement();
+			if(leftClick && scope.activeElement){
+				scope.selection = scope.activeElement
+				window.store.dispatch({type: 'LAYER_SELECTED', payload: window.mockup_editor.selection.layer})
+			}else{
+				window.store.dispatch({type: 'LAYER_DESELECTED', payload: {}})
+				scope.selection = null
+				scope.draw();
+			}
+		}
+
+		function mouseMoveControl(event){
+			// update mouse
+			if(event.type == "touchstart"){
+				var rawMouseX = event.touches[0].pageX;
+				var rawMouseY = event.touches[0].pageY;
+
+				mouseX = (event.touches[0].pageX - $(scope.canvas).offset().left) * cmPerPixel + scope.originX * cmPerPixel;
+				mouseY = (event.touches[0].pageY - $(scope.canvas).offset().top) * cmPerPixel + scope.originY * cmPerPixel;
+			}else{
+				var rawMouseX = event.pageX;
+				var rawMouseY = event.pageY;
+
+				mouseX = (event.pageX - $(scope.canvas).offset().left) * cmPerPixel + scope.originX * cmPerPixel;
+				mouseY = (event.pageY - $(scope.canvas).offset().top) * cmPerPixel + scope.originY * cmPerPixel;
+			}
+
+			// panning
+			if (mouseDown && rightClick) {
+				scope.originX += (lastX - rawMouseX);
+				scope.originY += (lastY - rawMouseY);
+				lastX = rawMouseX;
+				lastY = rawMouseY;
+			}
+
+			//dragging
+			if(mouseDown && leftClick && scope.activeElement/* && scope.activeElement==scope.selection*/ && scope.activeElement.layer){
+				var layer = scope.activeElement.layer
+				if(scope.activeElement.corner){
+					if(scope.activeElement.corner == 'top'){
+						layer.position.y += (mouseY - lastMouseY)*100/scope.mockup_height
+						if(layer.position.y<0){
+							layer.position.y = 0
+						}else{
+							layer.height -= (mouseY - lastMouseY)*100/scope.mockup_height
+						}
+					}else if(scope.activeElement.corner == 'right'){
+						layer.width += (mouseX - lastMouseX)*100/scope.mockup_width
+						layer.width<0?layer.width = 0:null
+						layer.width>100?layer.width = 100:null
+						if(layer.width + layer.position.x > 100){
+							layer.width = 100 - layer.position.x
+						}
+					}else if(scope.activeElement.corner == 'bottom'){
+						layer.height += (mouseY - lastMouseY)*100/scope.mockup_height
+						layer.height<0?layer.height = 0:null
+						layer.height>100?layer.height = 100:null
+						if(layer.height + layer.position.y > 100){
+							layer.height = 100 - layer.position.y
+						}
+					}else if(scope.activeElement.corner == 'left'){
+						layer.position.x += (mouseX - lastMouseX)*100/scope.mockup_width
+						if(layer.position.x<0){
+							layer.position.x = 0
+						}else{
+							layer.width -= (mouseX - lastMouseX)*100/scope.mockup_width
+						}
+					}
+				}else{
+					layer.position.x += (mouseX - lastMouseX)*100/scope.mockup_width
+					layer.position.y += (mouseY - lastMouseY)*100/scope.mockup_height
+				}
+
+					layer.position.x<0?layer.position.x = 0:null
+					layer.position.x>100?layer.position.x = 100:null
+					layer.position.y<0?layer.position.y = 0:null
+					layer.position.y>100?layer.position.y = 100:null
+					layer.width<0?layer.width = 0:null
+					layer.width>100?layer.width = 100:null
+					layer.height<0?layer.height = 0:null
+					layer.height>100?layer.height = 100:null
+
+			}
+
+			lastX = rawMouseX;
+			lastY = rawMouseY; 
+
+			lastMouseX = mouseX;
+			lastMouseY = mouseY; 
+
+			if(!mouseDown){
+				scope.findActiveElement();
+			}
+
+			scope.draw();
+		}
+
+		function mouseScroll(e){
+			e.preventDefault();
+			if(e.wheelDelta / 120 > 0) {
+				// if(pixelsPerCm <2){
+					var centerX = scope.canvas.width / 2;
+					var centerY = scope.canvas.height / 2;
+					var new_x = (centerX) * cmPerPixel + scope.originX * cmPerPixel;
+					var new_y = (centerY) * cmPerPixel + scope.originY * cmPerPixel;
+					pixelsPerCm+=0.01;
+					scope.updateScale();
+					setCenterAt(new_x,new_y);
+				// }
+			} else {
+				// if(pixelsPerCm>0.7){
+					var centerX = scope.canvas.width / 2;
+					var centerY = scope.canvas.height / 2;
+					var new_x = (centerX) * cmPerPixel + scope.originX * cmPerPixel;
+					var new_y = (centerY) * cmPerPixel + scope.originY * cmPerPixel;
+					pixelsPerCm-=0.01;
+					scope.updateScale();
+					setCenterAt(new_x,new_y);
+				// }
+			}
+		}
+	}
+
+	this.draw = function(){
+		function drawCircle(centerX,centerY,radius,fill,fillColor,stroke,strokeColor,strokeWidth){
+			context.beginPath();
+			context.arc(centerX, centerY, radius, 0, 2 * Math.PI, false);
+			if(fill){
+				context.fillStyle = fillColor;
+				context.fill();
+			}
+			if(stroke){
+				context.lineWidth = strokeWidth;
+				context.strokeStyle = strokeColor;
+				context.stroke();
+			}
+		}
+		
+		var context = scope.canvas.getContext('2d')
+		var canvas = scope.canvas
+		context.clearRect(0, 0, scope.canvas.width, scope.canvas.height);
+		context.fillStyle = '#aaaaaa'
+		context.fillRect(0, 0, scope.canvas.width, scope.canvas.height);
+
+		context.fillStyle = '#ffffff'
+		context.fillRect(scope.convertX(0), scope.convertY(0), scope.convertCmToPixel(scope.mockup_width), scope.convertCmToPixel(scope.mockup_height));
+
+		if(scope.loaded_tracing_image){
+			context.drawImage(scope.loaded_tracing_image,scope.convertX(0), scope.convertY(0), scope.convertCmToPixel(scope.mockup_width), scope.convertCmToPixel(scope.mockup_height));
+		}
+
+		for(var i=0;i<scope.mockup.layers.length;i++){
+			var layer = scope.mockup.layers[i]
+			if(!layer.fillColor){
+				layer.fillColor =  "rgba("+Math.floor(Math.random()*256)+','+Math.floor(Math.random()*256)+','+Math.floor(Math.random()*256)+',0.3)'
+			}
+
+			context.fillStyle = scope.mockup.layers[i].fillColor
+			context.fillRect(
+				scope.convertPercentX(layer.position.x),scope.convertPercentY(layer.position.y),
+				scope.convertPercentToPixelX(layer.width),scope.convertPercentToPixelY(layer.height)
+			);
+
+			if((scope.activeElement && scope.activeElement.layer==layer) || (scope.selection && scope.selection.layer==layer)){
+				context.fillStyle = 'rgba(0,0,0,0.1)'
+				context.fillRect(
+					scope.convertPercentX(layer.position.x),scope.convertPercentY(layer.position.y),
+					scope.convertPercentToPixelX(layer.width),scope.convertPercentToPixelY(layer.height)
+				);
+			}
+
+			var rad_top = scope.convertCmToPixel(8)
+			var rad_left = scope.convertCmToPixel(8)
+			var rad_bottom = scope.convertCmToPixel(8)
+			var rad_right = scope.convertCmToPixel(8)
+			if(scope.activeElement && scope.activeElement.layer && scope.activeElement.corner && scope.activeElement.layer==layer){
+				scope.activeElement.corner=='top'?rad_top = scope.convertCmToPixel(16):null
+				scope.activeElement.corner=='left'?rad_left = scope.convertCmToPixel(16):null
+				scope.activeElement.corner=='bottom'?rad_bottom = scope.convertCmToPixel(16):null
+				scope.activeElement.corner=='right'?rad_right = scope.convertCmToPixel(16):null
+			}
+
+			drawCircle(
+				scope.convertPercentX(layer.position.x + (layer.width/2)),
+				scope.convertPercentY(layer.position.y),
+				rad_top,
+				true,layer.fillColor.split('0.3')[0]+'1)',
+				true,'#000000',scope.convertCmToPixel(1)
+			);
+
+			drawCircle(
+				scope.convertPercentX(layer.position.x + layer.width),
+				scope.convertPercentY(layer.position.y + (layer.height)/2),
+				rad_right,
+				true,layer.fillColor.split('0.3')[0]+'1)',
+				true,'#000000',scope.convertCmToPixel(1)
+			);
+
+			drawCircle(
+				scope.convertPercentX(layer.position.x + (layer.width/2)),
+				scope.convertPercentY(layer.position.y + layer.height),
+				rad_bottom,
+				true,layer.fillColor.split('0.3')[0]+'1)',
+				true,'#000000',scope.convertCmToPixel(1)
+			);
+
+			drawCircle(
+				scope.convertPercentX(layer.position.x),
+				scope.convertPercentY(layer.position.y + (layer.height)/2),
+				rad_left,
+				true,layer.fillColor.split('0.3')[0]+'1)',
+				true,'#000000',scope.convertCmToPixel(1)
+			);
+		}
+	}
+
+	this.findActiveElement = function(){
+		var tolerance = 20;
+		var ordered_layers = _.sortBy(scope.mockup.layers,function(o){
+	        return -o.layer_index
+	    })
+	    scope.activeElement = null
+		for(var i=0;i<ordered_layers.length;i++){
+			var layer = ordered_layers[i]
+			if(utils.distance(mouseX,mouseY,scope.convertPercentToCmX(layer.position.x + (layer.width/2)),scope.convertPercentToCmY(layer.position.y))<tolerance){
+				scope.activeElement = {
+					layer: layer,
+					corner: 'top'
+				}
+				scope.draw();
+				return;
+			}else if(utils.distance(mouseX,mouseY,scope.convertPercentToCmX(layer.position.x + (layer.width/2)),scope.convertPercentToCmY(layer.position.y + layer.height))<tolerance){
+				scope.activeElement = {
+					layer: layer,
+					corner: 'bottom'
+				}
+				scope.draw();
+				return;
+			}else if(utils.distance(mouseX,mouseY,scope.convertPercentToCmX(layer.position.x),scope.convertPercentToCmY(layer.position.y + (layer.height/2)))<tolerance){
+				scope.activeElement = {
+					layer: layer,
+					corner: 'left'
+				}
+				scope.draw();
+				return;
+			}else if(utils.distance(mouseX,mouseY,scope.convertPercentToCmX(layer.position.x + layer.width),scope.convertPercentToCmY(layer.position.y + (layer.height/2)))<tolerance){
+				scope.activeElement = {
+					layer: layer,
+					corner: 'right'
+				}
+				scope.draw();
+				return;
+			}
+		}
+
+
+		ordered_layers.reverse();
+		for(var i=0;i<ordered_layers.length;i++){
+			var layer = ordered_layers[i]
+			var algorithm_offset = 100;
+			var verticesInCm = [
+				{
+					x:algorithm_offset+scope.convertPercentToCmX(layer.position.x),
+					y:algorithm_offset+scope.convertPercentToCmY(layer.position.y)
+				},
+				{
+					x:algorithm_offset+scope.convertPercentToCmX(layer.position.x + layer.width),
+					y:algorithm_offset+scope.convertPercentToCmY(layer.position.y)
+				},
+				{
+					x:algorithm_offset+scope.convertPercentToCmX(layer.position.x + layer.width),
+					y:algorithm_offset+scope.convertPercentToCmY(layer.position.y + layer.height)
+				},
+				{
+					x:algorithm_offset+scope.convertPercentToCmX(layer.position.x),
+					y:algorithm_offset+scope.convertPercentToCmY(layer.position.y + layer.height)
+				}
+
+			]
+			if(utils.pointInPolygon(algorithm_offset+mouseX,algorithm_offset+mouseY,verticesInCm,100000,100000)){
+				scope.activeElement = {
+					layer: layer
+				}
+			}
+		}
+		scope.draw();
+	}
+
+	this.convertPercentX = function(x){
+		return scope.convertX(x*scope.mockup_width/100)
+	}
+
+	this.convertPercentY = function(y){
+		return scope.convertY(y*scope.mockup_height/100)
+	}
+
+	this.convertX = function(x) {
+		return (x - scope.originX * cmPerPixel) * pixelsPerCm;
+	}
+
+	this.convertY = function(y) {
+		return (y - scope.originY * cmPerPixel) * pixelsPerCm;
+	}
+
+	this.convertPercentToCmX = function(a){
+		return a*scope.mockup_width/100
+	}
+
+	this.convertPercentToCmY = function(a){
+		return a*scope.mockup_height/100;
+	}
+
+	this.convertPercentToPixelX = function(a){
+		return scope.convertCmToPixel(a*scope.mockup_width/100);
+	}
+
+	this.convertPercentToPixelY = function(a){
+		return scope.convertCmToPixel(a*scope.mockup_height/100);
+	}
+
+	this.convertCmToPixel = function(a){
+		return a*pixelsPerCm;
+	}
+
+	this.convertPixelToCm = function(a){
+		return a*cmPerPixel;
+	}
+
+
+	this.setView = function(center,width,height,offsetPercent){
+		if(offsetPercent == undefined){
+			offsetPercent = 0;
+		}
+		var inner_width = scope.canvas.width;
+		var inner_height = scope.canvas.height;
+		
+		var centerX = inner_width / 2;
+		var centerY = inner_height / 2;
+
+		// var centerFloorplan = floorplan.getCenter();
+		var widthRatio = inner_width / width; 
+		var heightRatio = inner_height / height;
+
+		if(widthRatio<heightRatio){
+			pixelsPerCm = inner_width/(width*0.01*(100+offsetPercent));
+			scope.updateScale();
+		}else {
+			pixelsPerCm = inner_height/(height*0.01*(100+offsetPercent));
+			scope.updateScale();
+		}
+		
+		scope.originX = (center.x )* pixelsPerCm - centerX;
+		scope.originY = (center.y) * pixelsPerCm - centerY;
+		scope.draw();
+	}
+
+	this.addLayer = function(){
+		scope.mockup.layers.push({
+            type: 'static',
+            obj_src: null,
+            mtl_src: null,
+            image_src: 'null',
+            layer_index: scope.mockup.layers.length,
+            position: {x:0,y:0},
+            width: 100,
+            height: 100
+		})
+
+		scope.draw();
+	}
+
+	this.updateScale = function(){
+		cmPerPixel = 1/pixelsPerCm
+	}
+
+	function setCenterAt(x,y){
+		var centerX = scope.canvas.width/2;
+		var centerY = scope.canvas.height/2;
+		scope.originX = x * pixelsPerCm - centerX;
+		scope.originY = y * pixelsPerCm - centerY;
+		scope.draw();
+	}
+
+	this.handleWindowResize = function() {
+		var base_width = Math.floor(window.innerWidth*0.5)
+		scope.canvas.style.width = base_width+'px'
+		scope.canvas.style.height = (scope.mockup_height/scope.mockup_width)*base_width + 'px'
+		scope.canvas.width = base_width
+		scope.canvas.height = (scope.mockup_height/scope.mockup_width)*base_width
+
+		scope.draw();
+	}
+
+
+	this.export = function(){
+
+	}
+
+	init();
+}

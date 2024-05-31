@@ -1,0 +1,217 @@
+.navbar {
+  display: flex;
+  align-items: center;
+/* position: fixed; */
+  background-color:#fff;
+  justify-content: space-between;
+  /* padding-bottom: 20px; */
+}
+.navbar-logo {
+  height: 60px;
+  cursor: pointer;
+  /* padding-top: 6px; */
+}
+
+.search-bar {
+  display: flex;
+  justify-content: flex-start;
+  align-items: center;
+  gap: 20px;
+  padding: 12px 20px;
+  border: 1px solid var(--grey);
+  border-radius: 2rem;
+  padding-right: 20px;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 8%), 0 4px 12px rgb(0 0 0 / 5%);
+}
+
+.search-bar:hover {
+  box-shadow: 0 1px 2px rgb(0 0 0 / 15%), 0 4px 12px rgb(0 0 0 / 10%);
+  transition: all 0.2s;
+  cursor: pointer;
+}
+
+.search-bar-text {
+  font-size: 0.85rem;
+  font-weight: 600;
+  border-right: 1px solid var(--grey);
+  padding-right: 0.5rem;
+}
+.search-bar-text2 {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--font-grey);
+  padding-right: 0.5rem;
+}
+
+.btn {
+  display: flex;
+  justify-content: flex-start;
+  align-items: center;
+  gap: 0.5rem;
+  /* padding: 22px 0px 10px 0px; */
+  border: 1px solid var(--grey);
+  border-radius: 2rem;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 8%), 0 4px 12px rgb(0 0 0 / 5%);
+  padding-top: 6px;
+}
+.btn:hover {
+  box-shadow: 0 1px 2px rgb(0 0 0 / 15%), 0 4px 12px rgb(0 0 0 / 10%);
+  transition: all 0.2s;
+  cursor: pointer;
+}
+
+.search-icon-div {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background-color: var(--theme);
+  padding: 0.25rem;
+  border-radius: 50%;
+  color: var(--white);
+}
+
+.profile-container {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 0.25rem;
+  padding-top: 10px;
+  cursor: pointer;
+}
+
+.airbnb-your-home {
+  padding: 1rem;
+  font-weight: 600;
+  border-radius: 2rem;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.airbnb-your-home:hover {
+  background-color: var(--light-grey);
+}
+
+.profile-menu-flex {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.25rem;
+  color: var(--font-grey);
+  border: 1px solid var(--grey);
+  padding: 0.5rem;
+  border-radius: 2rem;
+}
+
+.menu-items {
+  padding: 0.5rem 1rem !important;
+  font-size: 0.8rem;
+  color: var(--font-grey);
+}
+
+.bottom-nav {
+  display: none;
+}
+
+/* @media only screen and (max-width: 800px) {
+  .search-bar,
+  .airbnb-your-home {
+    display: none;
+  }
+
+  .navbar {
+    padding-left: 1.5rem;
+    padding-right: 1.5rem;
+  }
+
+  .profile-menu-flex {
+    position: fixed;
+    top: 0.5rem;
+    right: 1.5rem;
+  }
+
+  .bottom-nav {
+    display: block;
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    border-top: 1px solid var(--grey);
+    box-shadow: 0 1px 2px rgb(0 0 0 / 8%), 0 4px 12px rgb(0 0 0 / 5%);
+  }
+} */
+.scrolling-wrapper {
+  overflow-x: scroll;
+  white-space: nowrap;
+  display: flex;
+  scrollbar-width: none;
+  display: flex;
+  gap: 50px;
+}
+.icon {
+  display: flex;
+  gap: 10px;
+  flex-direction: column;
+  align-items: center;
+  cursor: pointer;
+  opacity: 0.7;
+  font-weight: 500;
+}
+.icon:hover {
+  opacity: 1;
+}
+.icon img {
+  height: 20px;
+  width: 24px;
+}
+/* .icon span{
+  opacity: 0.6;
+}
+.icon :hover{
+  opacity: 1.1;
+} */
+.aa {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.arrow-left-arrow {
+  background-color: #f0f0f0;
+  border: none;
+  color: #333;
+  padding: 10px 15px;
+  font-size: 16px;
+  cursor: pointer;
+  border-radius: 5px;
+  box-shadow: 10px 11px 14px rgba(0, 0, 0, 0.1);
+}
+.arrow-left-arrow:hover {
+  transform: scale(1.1);
+  transition: 0.5s;
+}
+.arrow-right-arrow {
+  background-color: #f0f0f0;
+  border: none;
+  color: #333;
+  padding: 10px 15px;
+  font-size: 16px;
+  cursor: pointer;
+  border-radius: 5px;
+  box-shadow: 10px 11px 14px rgba(0, 0, 0, 0.1);
+}
+.arrow-right-arrow:hover {
+  transform: scale(1.1);
+  transition: 0.5s;
+}
+.Mid {
+  display: flex;
+  gap: 24px;
+  margin-bottom: 20px;
+}
+.Mid div {
+  font-size: 14px;
+  cursor: pointer;
+}
+.Mid div:focus {
+  text-decoration: underline;
+  outline: none;
+}

@@ -1,0 +1,4821 @@
+class DM_Editor {
+	class_type = 'editor'
+	//Design of the editor
+	design = null;
+
+	//Undo redo stack
+	undoStack = [];
+	redoStack = [];
+	undo_stack_disabled = false
+
+	//dom of the editor it contains dom of the design and dom of the selection interface
+	dom = document.createElement('div');
+
+	//interface mode
+	mode = 'default';
+
+	//active seleltion related properties
+	active_page = null
+	clipboardObject = null;
+	temporary_group = null;
+	activeElement = null;
+	selection = null;
+	cropFillGapChanges = {}
+	initialObject = null;
+	initialCropObject = null;
+	activeCropImage = null;
+	area_selection = null;
+	background_crop_corner = {
+		top_left_crop_2: false,
+		top_right_crop_2: false,
+		bottom_right_crop_2: false,
+		bottom_left_crop_2: false
+	}
+
+
+	//redraw flags
+	needs_redraw = false
+	render_timer_destroyed = false
+	render_timer = null;
+
+	//drag and drop related properties
+	drag_ghost_image = null;
+	drag_details = null;
+
+
+	//interface doms
+	interface_dom = document.createElement('div');
+	crop_mode_dom = null;
+	crop_mode_image = null;
+	snapping_lines_dom = document.createElement('div');
+	textarea_dom = document.createElement('textarea');
+	area_selection_dom = document.createElement('div');
+	selection_dom = document.createElement('div');
+	present_index = null;
+	fullscreen_hover_timer = null;
+	presentation_control = document.createElement('div');
+	present_next_button = document.createElement('button');
+	present_previous_button = document.createElement('button');
+	fullscreen_el = document.createElement('div');
+	quill = null;
+	quill_object = null;
+	crop_mode_handle = '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="24" height="24" viewBox="0 0 24 24"><defs><path id="_1944785510__b" d="M10 18.95a2.51 2.51 0 0 1-3-2.45v-7a2.5 2.5 0 0 1 2.74-2.49L10 7h6a3 3 0 0 1 3 3h-9v8.95z"></path><filter id="_1944785510__a" width="250%" height="250%" x="-75%" y="-66.7%" filterUnits="objectBoundingBox"><feMorphology in="SourceAlpha" operator="dilate" radius=".5" result="shadowSpreadOuter1"></feMorphology><feOffset in="shadowSpreadOuter1" result="shadowOffsetOuter1"></feOffset><feColorMatrix in="shadowOffsetOuter1" result="shadowMatrixOuter1" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.07 0"></feColorMatrix><feOffset dy="1" in="SourceAlpha" result="shadowOffsetOuter2"></feOffset><feGaussianBlur in="shadowOffsetOuter2" result="shadowBlurOuter2" stdDeviation="2.5"></feGaussianBlur><feColorMatrix in="shadowBlurOuter2" result="shadowMatrixOuter2" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.15 0"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="shadowMatrixOuter2"></feMergeNode></feMerge></filter></defs><g fill="none" fill-rule="evenodd"><use fill="#000" filter="url(#_1944785510__a)" xlink:href="#_1944785510__b"></use><use fill="#FFF" xlink:href="#_1944785510__b"></use></g></svg>';
+
+	
+	//mouse events related properties
+	initialMouseX = null;
+	initialMouseY = null;
+	mouseX = null;
+	mouseY = null;
+	rawMouseX = null;
+	rawMouseY = null;
+	lastMouseX = null;
+	lastMouseY = null;
+	leftClick = false;
+	rightClick = false;
+	mouseDown = false;
+	objectMoved = false;
+	areaMoved = false;
+	mouseUpTimer = null;
+	mouse_double_clicked = null;
+
+	//static images
+	rotate_svg = null;
+	grid_background = null;
+
+	//snapping properties
+	snapping_lines = [];
+	snapping_lines_to_draw = null
+
+	constructor(design_file,design_save_id,parent_doms,interface_dom_parent, dont_activate_controller){
+		var scope = this
+		if(design_file){
+			this.design = new DM_Design();
+			this.design.master = this;
+			this.design.design_save_id = design_save_id;
+			this.design.load(design_file);
+			this.design.draw();
+			for (let i = 0; i < this.design.doms.length; i++) {
+				parent_doms[i].appendChild(this.design.doms[i]);
+			}
+			this.active_page = this.design.pages[0];
+
+			this.undoStack.push(this.design.save());
+		}
+
+		if(!dont_activate_controller){
+			if(interface_dom_parent){
+				interface_dom_parent.appendChild(this.interface_dom);
+			}
+		}
+
+		// this.dom.innerHTML = ''
+		// document.body.appendChild(this.dom)
+
+		if(!dont_activate_controller){
+			this.interface_dom.innerHTML = ''
+			this.setupInterfaceDOM();
+			this.activateController();
+		}
+
+		$(window).resize(this.handleWindowResize.bind(this));
+		this.handleWindowResize();
+
+		setTimeout(function(){
+			scope.handleWindowResize();
+		},0)
+		this.redraw_listener();
+
+
+		this.save_snapshot_debounced.cancel();
+		this.save_data_debounced.cancel();
+
+	}
+
+	redraw_listener() {
+	    if (this.needs_redraw) {
+	        this.draw()
+	        this.needs_redraw = false
+	        this.redraw_listener()
+	    }else if(!this.render_timer_destroyed){
+	    	clearTimeout(this.render_timer);
+	        this.render_timer = setTimeout(this.redraw_listener.bind(this), 20)
+	    }
+	}
+
+	destroy(){
+		this.render_timer_destroyed = true
+		this.deactivateController();
+	}
+
+	dummy_event_function(e) {
+		e.stopPropagation();
+	} 
+
+	setQuill(object){
+		var scope = this
+		if(this.quill){
+			if(this.quill_object == object){
+				return
+			}else{
+				this.destroyQuill();
+			}
+		}
+
+		object.editor_being_used = true;
+		this.draw();
+
+		let current_text_div = document.getElementById(object.id);
+		let cloned_div = current_text_div.cloneNode(true);
+		cloned_div.id = object.id + '_quill';
+		// cloned_div.style.left = Number(cloned_div.style.left.split('p')[0]) + 165 + 'px';
+		// cloned_div.style.top = Number(cloned_div.style.top.split('p')[0]) + 26 + 'px';
+		cloned_div.style.left = Number(cloned_div.style.left.split('p')[0]) + current_text_div.parentNode.offsetLeft + 'px';
+		cloned_div.style.top = Number(cloned_div.style.top.split('p')[0]) + current_text_div.parentNode.offsetTop + 'px';
+		document.getElementById(object.id).style.display = 'none';
+		object.get_parent('page').dom.parentElement.appendChild(cloned_div);
+		cloned_div.style.setProperty('--ql-editor-color', current_text_div.style.color);
+		this.quill = new Quill(document.getElementById(object.id+'_quill'), {
+			modules: {
+				keyboard: { bindings: { list: { key: 'backspace', context: { format: ['list'] }, handler: function (range, context) { if (range.length === 0 && range.index !== 0) { this.quill.deleteText(range.index - 1, 1, Quill.sources.USER); } else { this.quill.deleteText(range, Quill.sources.USER); } } } } }
+			},
+			scrollingContainer: document.getElementById(object.id+'_quill')
+		});
+
+		this.quill.clipboard.addMatcher (Node.ELEMENT_NODE, function (node, delta) {
+			var plaintext = $ (node).text ();
+			return delta.slice(0,0).insert (plaintext);
+		});
+
+		this.quill.on('text-change', function(delta, oldDelta, source) {
+			// object.text_details.text = scope.quill.getContents().ops[0].insert.replaceAll("\n","");
+			object.text_details.text = scope.quill.getContents().ops[0].insert.substr(0,scope.quill.getContents().ops[0].insert.length-1);
+			delete object.last_style;
+			delete object.last_default_style;
+			object.set_redraw()
+			scope.needs_redraw = true;
+		});
+
+		var paragraphs = this.quill.container.children[0].getElementsByTagName('p');
+		for(var i=0;i<paragraphs.length;i++){
+			paragraphs[i].style.marginBottom = "0px";
+			paragraphs[i].style.zIndex = "1010";
+		}
+
+		// this.quill.container.children[0].children[0].style.height = object.get_parent('design').convertCmToPixel(object.height) + 'px';
+
+		this.quill.focus();
+
+		$(window).click(this.deselectElements.bind(this));
+		$(this.quill.container).click(this.dummy_event_function);
+		
+		// $(this.quill.container).off("focusout", this.deselectElements)
+		// $(this.quill.container).focusout(this.deselectElements.bind(this))
+
+		this.quill_object = object
+
+		this.interface_dom.style.display = "none"
+
+		this.needs_redraw = true
+	}
+
+	destroyQuill(){
+		if(this.quill){
+			$(window).off('click');
+			$(this.quill.container).off('click');
+			// $(this.quill.container).off("focusout", this.deselectElements)
+			this.quill.enable(false); 
+			this.quill.container.parentNode.removeChild(this.quill.container);
+			this.quill.container.remove();
+			this.quill = null;
+		}
+
+		if(this.quill_object){
+			this.quill_object.editor_being_used = false;
+			this.quill_object.dom = null;
+			this.quill_object.set_redraw();
+			// document.getElementById(this.quill_object.id).style.display = 'block';
+			document.getElementById(this.quill_object.id).remove();
+			delete this.quill_object.last_style;
+			delete this.quill_object.last_default_style;
+			this.draw()
+			this.quill_object = null;
+		}
+
+		this.interface_dom.style.display = "block"
+	}
+
+	set_interface_dimensions(){
+		var scope = this
+		if(scope.interface_dom.parentElement){
+			var p = scope.interface_dom.parentElement;
+			var old_overflow = p.style.overflow;
+
+			p.style.overflow = "visible";
+			scope.interface_dom.style.width = (p.scrollWidth - 2) + 'px';
+			scope.interface_dom.style.height = (p.scrollHeight - 2) + 'px';
+			p.style.overflow = old_overflow;
+		}else{
+			scope.interface_dom.style.height = '100%';
+			scope.interface_dom.style.width = '100%';
+		}
+	} 
+
+
+	setupInterfaceDOM(){
+		var scope = this;
+		scope.interface_dom.id = "interface_dom";
+		scope.interface_dom.style.position = 'absolute';
+		this.set_interface_dimensions();
+		// scope.interface_dom.style.height = '100%';
+		// scope.interface_dom.style.width = '100%';
+		scope.interface_dom.style.overflow = 'hidden';
+		scope.interface_dom.style.left = '0px';
+		scope.interface_dom.style.top = '0px';
+		scope.interface_dom.style.zIndex = 1000;
+
+
+		scope.selection_dom.style.position = 'absolute';
+		scope.selection_dom.style.display = 'block';
+		// scope.selection_dom.style.zIndex = 10000;
+
+		scope.area_selection_dom.style.position = 'absolute';
+		scope.area_selection_dom.style.display = 'none';
+		// scope.area_selection_dom.style.zIndex = 10000;
+
+
+		scope.textarea_dom.setAttribute('style','position:fixed;left:500px;top: 500px;background: transparent;border:none')
+		scope.textarea_dom.style.display = 'none'
+		scope.textarea_dom.style.zIndex = 10000;
+		
+		scope.snapping_lines_dom.style.position = 'relative';
+		scope.snapping_lines_dom.style.display = 'block'
+		// scope.snapping_lines_dom.style.zIndex = 10000;
+
+		scope.presentation_control.style.display = 'block'
+		scope.present_next_button.className = 'display_transition_delay'
+		scope.present_next_button.style.position = "fixed";
+		scope.present_next_button.style.width = "40px";
+		scope.present_next_button.style.height = "40px";
+		scope.present_next_button.style.borderRadius = "20px";
+		scope.present_next_button.style.right = "5%";
+		scope.present_next_button.style.top = "calc(50% - 20px)";
+		scope.present_next_button.style.visibility = 'hidden'
+		scope.present_next_button.innerHTML = '<span class="fa fa-chevron-right"></span>'
+		scope.present_next_button.onclick = function(){
+			scope.present_next();
+		}
+
+		scope.present_previous_button.className = 'display_transition_delay'
+		scope.present_previous_button.style.position = "fixed";
+		scope.present_previous_button.style.width = "40px";
+		scope.present_previous_button.style.height = "40px";
+		scope.present_previous_button.style.borderRadius = "20px";
+		scope.present_previous_button.style.left = "5%";
+		scope.present_previous_button.style.top = "calc(50% - 20px)";
+		scope.present_previous_button.style.visibility = 'hidden'
+		scope.present_previous_button.innerHTML = '<span class="fa fa-chevron-left"></span>'
+		scope.present_previous_button.onclick = function(){
+			scope.present_previous();
+		}
+
+		$(scope.presentation_control).append(scope.present_next_button);
+		$(scope.presentation_control).append(scope.present_previous_button);
+
+		$(scope.fullscreen_el).append(scope.presentation_control);
+
+		$(scope.fullscreen_el).mousemove(function(e){
+			scope.present_next_button.style.visibility = 'visible';
+			scope.present_previous_button.style.visibility = 'visible';
+			clearTimeout(scope.fullscreen_hover_timer)
+			scope.fullscreen_hover_timer = setTimeout(function(){
+				scope.present_next_button.style.visibility = 'hidden';
+				scope.present_previous_button.style.visibility = 'hidden';
+			},2000)
+		})
+
+		loadStaticImage('public/icons/scenery.svg')
+		.then(function(image) {
+			scope.grid_background = image
+			scope.needs_redraw = true;
+			return Promise.resolve()
+		})
+
+		loadStaticImage('uploads/refresh.svg')
+		.then(function(image) {
+			scope.rotate_svg = image
+			scope.needs_redraw = true;
+		})
+
+		scope.interface_dom.appendChild(scope.area_selection_dom);
+		scope.interface_dom.appendChild(scope.selection_dom);
+		scope.interface_dom.appendChild(scope.snapping_lines_dom);
+		scope.interface_dom.appendChild(scope.textarea_dom);
+	}
+
+	activateController(){
+		var events_dom = document;
+		if(this.interface_dom && this.interface_dom){
+			events_dom = this.interface_dom
+		}
+
+		$(events_dom).mousedown(this.mouseDownControl.bind(this))
+		$(events_dom).mouseup(this.mouseUpControl.bind(this))
+		$(events_dom).mousemove(this.mouseMoveControl.bind(this))
+		// $(events_dom).dblclick(this.mouseDoubleClickControl.bind(this));
+
+		events_dom.addEventListener("touchstart",this.mouseDownControl.bind(this));
+		events_dom.addEventListener("touchend",this.mouseUpControl.bind(this));
+		events_dom.addEventListener("touchmove",this.mouseMoveControl.bind(this));
+
+
+		this.design.pages[0].dom.addEventListener('scroll', function(e) {
+			this.needs_redraw = true
+		});
+
+
+		// $(events_dom).mousemove(this.mouseMoveControlParent.bind(this));
+		// $(events_dom).mouseup(this.mouseUpControlParent.bind(this));
+		// events_dom.addEventListener("touchmove",this.mouseMoveControlParent.bind(this));
+		// events_dom.addEventListener("touchend",this.mouseUpControlParent.bind(this));
+		$(document).keydown(this.keyDownControl.bind(this));
+
+		// if(this.dom.parentElement){
+			// $(this.dom).dblclick(this.mouseDoubleClickControlParent.bind(this))
+			// $(this.dom).mousedown(this.mouseDownControlParent.bind(this))
+			// this.dom.addEventListener("touchstart",this.mouseDownControlParent.bind(this));
+		// }
+	}
+
+	deactivateController = function(){
+		var events_dom = document;
+		if(this.interface_dom && this.interface_dom){
+			events_dom = this.interface_dom
+		}
+
+		$(events_dom).off('mousemove', this.mouseMoveControl);
+		$(events_dom).off('mouseup', this.mouseUpControl);
+		//TODO only keydown should be removed to avoid removing other events. but removing keydown only isnt working 
+		$(document).off();
+		// $(document).off('keydown', this.keyDownControl);
+		// $(events_dom).off('dblclick', this.mouseDoubleClickControl);
+		events_dom.removeEventListener("touchmove",this.mouseMoveControl);
+		events_dom.removeEventListener("touchend",this.mouseUpControl);
+		events_dom.removeEventListener("touchstart",this.mouseUpControl);
+
+		// if(scope.dom && scope.dom.parentElement){
+		// 	$(scope.dom).off('dblclick', mouseDoubleClickControlParent);
+		// 	$(scope.dom).off('mousedown', mouseDownControlParent);
+		// 	scope.dom.removeEventListener("touchstart",mouseDownControlParent);
+		// }
+	}
+
+	fix_presented_pages(){
+		var editor = this;
+		for(var i=0;i<editor.design.pages.length;i++){
+			if(editor.design.pages[i].old_parent){
+				editor.design.pages[i].old_parent.appendChild(editor.design.pages[i].dom)
+				delete editor.design.pages[i].old_parent;
+			}
+		}
+
+		if(editor.design.old_pixelsPerCm){
+			editor.design.pixelsPerCm = editor.design.old_pixelsPerCm;
+			editor.design.updateScale();
+			delete editor.design.old_pixelsPerCm
+		}
+
+		editor.draw();
+	}
+
+	present_next(){
+		var current_page = this.present_index;
+		if (current_page < this.design.pages.length - 1) {
+			if(this.design.pages[current_page].isAnimated()) {
+				this.design.pages[current_page].triggerExitAnimation()
+					.then(() => {
+						if (this.present_index != null) {
+							this.present(current_page + 1);
+						}
+					})
+			}
+			else {
+				this.present(current_page + 1);
+			}
+		}
+	}
+
+	present_previous(){
+		var current_page = this.present_index;
+		if(current_page > 0){
+			this.present(current_page - 1);
+		}
+	}
+
+	present(index){
+		var editor = this;
+
+		if(editor.present_index != null){
+			//was already in present mode
+		}else{
+			editor.deselectElements()
+			editor.draw();	
+		}
+		
+		if(index == undefined){
+			index = 0
+		}
+		var presentation_success = false;
+
+		var aspect = this.design.get_width()/this.design.get_height();
+		var new_width;
+		var new_height;
+
+		var screen_width = Math.floor(window.screen.width/PIXEL_RATIO);
+		var screen_height = Math.floor(window.screen.height/PIXEL_RATIO);
+
+		if((screen_width/screen_height) > aspect){
+			new_height = screen_height;
+			new_width = aspect*screen_height;
+		}else{
+			new_width = screen_width;
+			new_height = screen_width/aspect;
+		}
+
+		this.fix_presented_pages()
+
+		editor.design.pages[index].old_parent = editor.design.pages[index].dom.parentElement;
+		var scale_ratio = new_width/(editor.design.convertCmToPixel(editor.design.get_width()));
+		editor.design.old_pixelsPerCm = editor.design.pixelsPerCm;
+		editor.design.pixelsPerCm *= scale_ratio;
+		editor.design.updateScale();
+		console.log(editor.design.pixelsPerCm)
+		editor.draw();
+
+
+		var dummy_div = document.createElement('div');
+		dummy_div.className = "presentation_div"
+
+		dummy_div.style.position = 'absolute';
+		dummy_div.style.left = "calc(50% - "+(new_width/2)+"px";
+		// dummy_div.style.top = "calc(50% - "+(new_height/2)+"px";
+		dummy_div.style.width = Math.floor(new_width)+"px";
+		dummy_div.style.height = Math.floor(new_height)+"px";
+		dummy_div.style.backgroundColor = "red";
+		dummy_div.appendChild(editor.design.pages[index].dom);
+		
+		if(editor.design.pages[index].isAnimated()){
+			editor.design.pages[index].animate();
+		}
+
+		for (var i = editor.fullscreen_el.children.length - 1; i >= 0; i--) {
+			if(editor.fullscreen_el.children[i].className == "presentation_canvas"){
+				editor.fullscreen_el.removeChild(editor.fullscreen_el.children[i]);
+			}
+		}
+
+		$(editor.fullscreen_el).append(dummy_div);
+
+		if(!editor.fullscreen_el.parentElement){
+			document.body.appendChild(editor.fullscreen_el);
+		}
+
+		var onchange_fn = function(){
+			if(document.webkitFullscreenElement){
+				editor.fullscreen_el.style.backgroundColor = '#000000'
+
+				console.log('Entered present mode');
+			}else{
+				editor.fix_presented_pages();
+
+				editor.fullscreen_el.style.backgroundColor = ''
+				
+				document.body.removeChild(editor.fullscreen_el);
+
+				editor.present_index = null;
+				console.log('Exited present mode');
+			}
+		}
+
+
+		editor.fullscreen_el.onwebkitfullscreenchange = onchange_fn;
+		// editor.fullscreen_el.onmozfullscreenchange = onchange_fn;
+
+		if (editor.fullscreen_el.requestFullScreen) {  
+			editor.fullscreen_el.requestFullScreen();  
+			presentation_success = true;
+		} else if (editor.fullscreen_el.mozRequestFullScreen) {  
+			editor.fullscreen_el.mozRequestFullScreen();  
+			presentation_success = true;
+		} else if (editor.fullscreen_el.webkitRequestFullScreen) {  
+			editor.fullscreen_el.webkitRequestFullScreen();  
+			presentation_success = true;
+		}
+
+		if(presentation_success){
+			editor.present_index = index;		
+		}
+	}
+
+	keyDownControl(event){
+		var editor = this
+		if(event.target.type=="text" || event.target.type=="textarea" || this.quill){
+			return;
+		}
+
+		//TODO
+		// if(editor.active_page != scope){
+		// 	return
+		// }
+
+		var valid_case_in_presentation = (event.key == 'ArrowRight' || event.key == 'ArrowLeft') && !(event.ctrlKey||event.metaKey||event.shiftKey)
+		if(this.present_index != null && !valid_case_in_presentation){
+			return
+		}
+
+
+		if( (event.key == 'z' || event.key == 'Z') && (event.ctrlKey||event.metaKey) ){
+		    event.preventDefault();
+		    this.deselectElements()
+		    this.undo()
+		}else if( (event.key == 'y' || event.key == 'Y') && (event.ctrlKey||event.metaKey) ){
+		    event.preventDefault();
+		    this.deselectElements()
+	    	this.redo()
+	    }else if( (event.key == 'a' || event.key == 'A') && (event.ctrlKey||event.metaKey) ){
+		    event.preventDefault();
+		    this.setAreaSelection(this.active_page.objects)
+	    	this.redo()
+	    }else if( (event.key == '+'||event.key == '=') && (event.ctrlKey||event.metaKey) ){
+		    event.preventDefault();
+		    var new_zoom = this.design.calculateCurrentZoomInNumber()+10
+			new_zoom = Math.round(Math.round(new_zoom/10)*10);
+			if(window['rct_set_zoom']){
+				window['rct_set_zoom'](new_zoom)
+			}
+	    }else if( (event.key == '-') && (event.ctrlKey||event.metaKey) ){
+		    event.preventDefault();
+		    var new_zoom = this.design.calculateCurrentZoomInNumber()-10
+			new_zoom = Math.round(Math.round(new_zoom/10)*10);
+			if(window['rct_set_zoom']){
+				window['rct_set_zoom'](new_zoom)
+			}
+	    }else if(event.key == 'Backspace' || event.key == 'Delete'){
+		    event.preventDefault();
+		    if(this.selection  && this.selection.object){
+		    	if(this.selection.object.getGroup()){
+					this.selection.object.getGroup().remove();
+				}else if(this.selection.object.get_parent('box') && this.selection.object.get_parent('box').image){
+					if(this.selection.object.get_parent('box').image.dom.parentElement){
+						this.selection.object.get_parent('box').image.dom.parentElement.removeChild(this.selection.object.get_parent('box').image.dom)
+					}
+					this.selection.object.get_parent('box').image = null;
+		    		this.selection.object.get_parent('box').loaded_attached_image = null;
+		    		this.selection.object.get_parent('grid').set_redraw()
+		    	}else if(this.selection.object.get_parent('box')){
+		    		this.selection.object.get_parent('grid').remove();
+		    	}else if(this.selection.object.class_type == 'background' && this.selection.object.image_exists()){
+					this.selection.object.reset_image_source();
+					this.selection.object.reset_filter();
+					this.selection.object.reset_bgremoval();
+					this.selection.object.reset_mockup_details();
+					
+					this.selection.object.sub_type = ""
+					this.selection.object.set_redraw();
+					this.addUndoChange()
+					this.deselectElements()
+				}else{
+		    		this.selection.object.remove()
+		    	}
+		    	this.addUndoChange()
+		    	this.deselectElements()
+			}
+	    }else if(event.key == 'Enter'){
+		    event.preventDefault();
+		    if(this.mode == 'crop'){
+		    	this.deselectElements();
+		    }
+	    }else if(event.key == 'Escape'){
+		    event.preventDefault();
+	    	this.deselectElements(true);
+	    }else if( (event.key == 't' || event.key == 'T') && !(event.ctrlKey||event.metaKey||event.shiftKey) ){
+			event.preventDefault();
+			if(window['switch_nav_tab']){
+				switch_nav_tab('text')
+			}
+	    }else if( (event.key == 'g' || event.key == 'G') && (event.ctrlKey||event.metaKey) ){
+		    event.preventDefault();
+		    if( this.selection.object && this.selection.object!=this.temporary_group && (this.selection.object.type == 'group' || (this.selection.object.getGroup() && this.selection.object.getGroup()!=this.temporary_group)) ){
+				if(window['update_inputs_general']){
+					update_inputs_general(null,'ungroup');
+				}
+			}else if( this.selection.object && (this.selection.object==this.temporary_group || (this.selection.object.getGroup()==this.temporary_group && this.temporary_group!=null)) && (!this.group_already_exists(this.temporary_group)) ){
+				if(window['update_inputs_general']){
+					update_inputs_general(null,'group');
+				}
+			}
+	    }else if( (event.key == 'c' || event.key == 'C') && (event.ctrlKey||event.metaKey) ){
+		    event.preventDefault();
+		    if(this.selection){
+				if(this.selection.object.get_parent('grid')){
+					this.clipboardObject = this.selection.object.get_parent('grid')
+				}else{
+					this.clipboardObject = this.selection.object
+				}
+			}
+	    }else if( (event.key == 'v' || event.key == 'V') && (event.ctrlKey||event.metaKey) ){
+		    event.preventDefault();
+	    	if(this.clipboardObject){
+	    		var copy = this.clipboardObject.copy();
+	    		if(copy.group && copy.objects){
+	    			copy.group.position.x += 40;
+	    			copy.group.position.y += 40;
+    				this.addGroup(JSON.parse(JSON.stringify(copy)),undefined,true)
+	    		}else{
+	    			copy.position.x += 40;
+	    			copy.position.y += 40;
+    				this.addObject(JSON.parse(JSON.stringify(copy)),undefined,true)
+	    		}
+	    	}
+	    }else if((event.key == 'ArrowRight') && !(event.ctrlKey||event.metaKey||event.shiftKey)){
+	    	event.preventDefault();
+	    	event.stopPropagation();
+	    	if(this.present_index != null){
+	    		this.present_next();
+	    	}else if(this.selection && this.selection.object){
+	    		this.moveArrows(this.selection.object,5,0);
+	    		this.needs_redraw = true;
+	    	}
+	    }else if((event.key == 'ArrowLeft') && !(event.ctrlKey||event.metaKey||event.shiftKey)){
+	    	event.preventDefault();
+	    	event.stopPropagation();
+	    	if(this.present_index != null){
+	    		this.present_previous();
+	    	}else if(this.selection && this.selection.object){
+	    		this.moveArrows(this.selection.object,-5,0);
+	    		this.needs_redraw = true;
+	    	}
+	    }else if((event.key == 'ArrowUp') && !(event.ctrlKey||event.metaKey||event.shiftKey)){
+	    	event.preventDefault();
+	    	event.stopPropagation();
+	    	if(this.selection && this.selection.object){
+	    		this.moveArrows(this.selection.object,0,-5);
+	    		this.needs_redraw = true;
+	    	}
+	    }else if((event.key == 'ArrowDown') && !(event.ctrlKey||event.metaKey||event.shiftKey)){
+	    	event.preventDefault();
+	    	event.stopPropagation();
+	    	if(this.selection && this.selection.object){
+	    		this.moveArrows(this.selection.object,0,5);
+	    		this.needs_redraw = true;
+	    	}
+	    }else if((event.key == 'ArrowUp') && event.shiftKey){
+	    	event.preventDefault();
+	    	event.stopPropagation();
+	    	if(this.selection && this.selection.object){
+	    		var objects_to_edit = []
+	            if(this.selection.object.type == 'group'){
+	                objects_to_edit = this.selection.object.group_details.object_data.map(o => o.object);
+	            }else{
+	                objects_to_edit = [this.selection.object]
+	            }
+
+	            this.shiftLayerIndex(objects_to_edit,'up')
+	    		this.needs_redraw = true;
+	    	}
+	    }else if((event.key == 'ArrowDown') && event.shiftKey){
+	    	event.preventDefault();
+	    	event.stopPropagation();
+	    	if(this.selection && this.selection.object){
+	    		var objects_to_edit = []
+	            if(this.selection.object.type == 'group'){
+	                objects_to_edit = this.selection.object.group_details.object_data.map(o => o.object);
+	            }else{
+	                objects_to_edit = [this.selection.object]
+	            }
+
+	            this.shiftLayerIndex(objects_to_edit,'down')
+	    		this.needs_redraw = true;
+	    	}
+	    }
+	}
+
+	updateSnappingLines(){
+		var w = this.design.get_width(); var h = this.design.get_height();
+		this.snapping_lines = [
+			[{x:0,y:h/2},{x:w,y:h/2}],
+			[{x:w/2,y:0},{x:w/2,y:h}],
+			[{x:0.1*w,y:0.1*h},{x:0.9*w,y:0.1*h}],
+			[{x:0.9*w,y:0.1*h},{x:0.9*w,y:0.9*h}],
+			[{x:0.9*w,y:0.9*h},{x:0.1*w,y:0.9*h}],
+			[{x:0.1*w,y:0.9*h},{x:0.1*w,y:0.1*h}],
+			[{x:0,y:0},{x:w,y:0}],
+			[{x:w,y:0},{x:w,y:h}],
+			[{x:w,y:h},{x:0,y:h}],
+			[{x:0,y:h},{x:0,y:0}]
+		]
+
+		for (var i = 0; i < this.active_page.objects.length; i++) {
+			var vertices = this.active_page.objects[i].getVertices();
+			this.snapping_lines.push(
+				[vertices[0],vertices[1],this.active_page.objects[i]],
+				[vertices[1],vertices[2],this.active_page.objects[i]],
+				[vertices[2],vertices[3],this.active_page.objects[i]],
+				[vertices[3],vertices[0],this.active_page.objects[i]]
+			)
+		}
+	}
+
+	checkSnapWithObject(object,corner,single_line_only){
+		var scope = this;
+		var vertices = object.getVertices();
+		var dx = 0; var dy = 0;
+
+		var corner_line
+
+		if(corner == 'top_left'){
+			var points = [vertices[0]]
+			corner_line = utils.getGeneralLineFromLineSegment(
+				vertices[2],vertices[0]
+			);
+		}else if(corner == 'top_right'){
+			var points = [vertices[1]]
+			corner_line = utils.getGeneralLineFromLineSegment(
+				vertices[1],vertices[3]
+			);
+		}else if(corner == 'bottom_right'){
+			var points = [vertices[2]]
+			corner_line = utils.getGeneralLineFromLineSegment(
+				vertices[2],vertices[0]
+			);
+		}else if(corner == 'bottom_left'){
+			var points = [vertices[3]]
+			corner_line = utils.getGeneralLineFromLineSegment(
+				vertices[1],vertices[3]
+			);
+		}else if(corner == 'top'){
+			var points = [{x:(vertices[0].x+vertices[1].x)/2,y:(vertices[0].y+vertices[1].y)/2}]
+			corner_line = utils.getGeneralLineFromLineSegment(
+				{x:(vertices[0].x+vertices[1].x)/2,y:(vertices[0].y+vertices[1].y)/2},
+				{x:(vertices[2].x+vertices[3].x)/2,y:(vertices[2].y+vertices[3].y)/2}
+			);
+		}else if(corner == 'right'){
+			var points = [{x:(vertices[1].x+vertices[2].x)/2,y:(vertices[1].y+vertices[2].y)/2}]
+			corner_line = utils.getGeneralLineFromLineSegment(
+				{x:(vertices[2].x+vertices[1].x)/2,y:(vertices[2].y+vertices[1].y)/2},
+				{x:(vertices[0].x+vertices[3].x)/2,y:(vertices[0].y+vertices[3].y)/2}
+			);
+		}else if(corner == 'bottom'){
+			var points = [{x:(vertices[2].x+vertices[3].x)/2,y:(vertices[2].y+vertices[3].y)/2}]
+			corner_line = utils.getGeneralLineFromLineSegment(
+				{x:(vertices[0].x+vertices[1].x)/2,y:(vertices[0].y+vertices[1].y)/2},
+				{x:(vertices[2].x+vertices[3].x)/2,y:(vertices[2].y+vertices[3].y)/2}
+			);
+		}else if(corner == 'left'){
+			var points = [{x:(vertices[0].x+vertices[3].x)/2,y:(vertices[0].y+vertices[3].y)/2}]
+			corner_line = utils.getGeneralLineFromLineSegment(
+				{x:(vertices[2].x+vertices[1].x)/2,y:(vertices[2].y+vertices[1].y)/2},
+				{x:(vertices[0].x+vertices[3].x)/2,y:(vertices[0].y+vertices[3].y)/2}
+			);
+		}else{
+			var points = vertices.concat([
+				{x:(vertices[0].x+vertices[1].x)/2,y:(vertices[0].y+vertices[1].y)/2},
+				{x:(vertices[1].x+vertices[2].x)/2,y:(vertices[1].y+vertices[2].y)/2},
+				{x:(vertices[2].x+vertices[3].x)/2,y:(vertices[2].y+vertices[3].y)/2},
+				{x:(vertices[3].x+vertices[0].x)/2,y:(vertices[3].y+vertices[0].y)/2}
+			])
+		}
+
+		scope.snapping_lines_to_draw = [];
+		var lines_already_snapped = [];
+
+		for (var i = 0; i < points.length; i++) {
+			var break_loop = false
+			for (var j = 0; j < scope.snapping_lines.length; j++) {
+				if(scope.snapping_lines[j][2] && scope.snapping_lines[j][2] == object){
+					continue
+				}
+				if(lines_already_snapped.indexOf(scope.snapping_lines[j])==-1){
+					var distance = utils.pointDistanceFromLine(
+						points[i].x, points[i].y,
+						scope.snapping_lines[j][0].x, scope.snapping_lines[j][0].y,
+						scope.snapping_lines[j][1].x, scope.snapping_lines[j][1].y
+					)
+					distance = scope.design.convertCmToPixel(distance)
+					if(distance<5){
+						if(corner && corner_line){
+							var snap_line = utils.getGeneralLineFromLineSegment(
+								scope.snapping_lines[j][0],scope.snapping_lines[j][1]
+							);
+							
+							if(utils.areLinesAlmostParallel(snap_line.a,snap_line.b,corner_line.a,corner_line.b)){
+								continue;
+							}
+						}
+						var closestPoint = utils.projectPointOnLine(
+							points[i].x, points[i].y,
+							scope.snapping_lines[j][0].x, scope.snapping_lines[j][0].y,
+							scope.snapping_lines[j][1].x, scope.snapping_lines[j][1].y
+						)
+
+						if(dx==0){
+							dx += (closestPoint.x - points[i].x)
+						}
+
+						if(dy==0){
+							dy += (closestPoint.y - points[i].y)
+						}
+
+						if(j<2){
+							scope.snapping_lines_to_draw.push(scope.snapping_lines[j])
+						}else if (j<6){
+							scope.snapping_lines_to_draw.push(scope.snapping_lines[2],scope.snapping_lines[3],scope.snapping_lines[4],scope.snapping_lines[5])
+						}else if(j<10){
+							scope.snapping_lines_to_draw.push(scope.snapping_lines[6],scope.snapping_lines[7],scope.snapping_lines[8],scope.snapping_lines[9])
+						}else if(scope.snapping_lines[j][2]){
+							scope.snapping_lines_to_draw.push(scope.snapping_lines[j])
+							var distance0 = utils.distance(scope.snapping_lines[j][0].x,scope.snapping_lines[j][0].y,closestPoint.x,closestPoint.y);
+							var distance1 = utils.distance(scope.snapping_lines[j][1].x,scope.snapping_lines[j][1].y,closestPoint.x,closestPoint.y);
+							if(distance0<distance1){
+								scope.snapping_lines_to_draw.push([closestPoint,scope.snapping_lines[j][0],object])
+							}else{
+								scope.snapping_lines_to_draw.push([closestPoint,scope.snapping_lines[j][1],object])
+							}
+						}else{
+							scope.snapping_lines_to_draw.push(scope.snapping_lines[j])
+						}
+
+						if(single_line_only){
+							return {x:dx,y:dy,snapping_line:scope.snapping_lines[j]}
+						}
+
+						lines_already_snapped.push(scope.snapping_lines[j])
+						// break_loop = true
+						// break;
+					}
+				}
+			}
+
+			// if(break_loop){
+			// 	break;
+			// }
+		}
+
+		scope.snapping_lines_to_draw = _.uniq(scope.snapping_lines_to_draw)
+
+
+		return {x:dx,y:dy}
+	}
+
+	resize(object, corner,mouseX,mouseY,snapping_line){
+		var scope = this;
+		var vertices = object.getVertices();
+		var nw_point = vertices[0];
+		var ne_point = vertices[1];
+		var se_point = vertices[2];
+		var sw_point = vertices[3];
+		var angle_right = Math.atan2(vertices[1].y - vertices[0].y,vertices[1].x - vertices[0].x)
+		var angle_bottom = Math.atan2(vertices[3].y - vertices[0].y,vertices[3].x - vertices[0].x)
+
+		var oldHeight;
+
+		if(object.type == 'group'){
+			oldHeight = []
+			object.updateGroupObjects()
+			for (var i = 0; i < object.group_details.object_data.length; i++) {
+				var child = object.group_details.object_data[i].object
+				if(child.type == 'text'){
+					oldHeight[i] = child.height;
+				}
+			}
+		}else if(object.type == 'text'){
+			oldHeight = object.height
+		}
+
+		if(corner == 'top_left'){
+			if(snapping_line){
+				var diagonal = utils.getGeneralLineFromLineSegment(
+					se_point,nw_point
+				);
+				var snap_general_line = utils.getGeneralLineFromLineSegment(
+					snapping_line[0],snapping_line[1]
+				);
+				if(!utils.areLinesAlmostParallel(diagonal.a,diagonal.b,snap_general_line.a,snap_general_line.b)){
+					var new_corner = utils.lineLineIntersectionGeneral(diagonal.a,diagonal.b,diagonal.c,snap_general_line.a,snap_general_line.b,snap_general_line.c)
+				}
+			}
+
+			if(!new_corner){
+				var new_corner = utils.projectPointOnLine(mouseX, mouseY,
+					se_point.x,se_point.y,
+					nw_point.x,nw_point.y);
+			}
+
+			var new_top_line = utils.getGeneralLineFromLineSegment(
+				new_corner,{x:new_corner.x + Math.cos(angle_right)*100,y:new_corner.y + Math.sin(angle_right)*100}
+			);
+
+			var new_left_line = utils.getGeneralLineFromLineSegment(
+				new_corner,{x:new_corner.x + Math.cos(angle_bottom)*100,y:new_corner.y + Math.sin(angle_bottom)*100}
+			);
+
+			var line_right = utils.getGeneralLineFromLineSegment(vertices[1],vertices[2]);
+			var line_bottom = utils.getGeneralLineFromLineSegment(vertices[2],vertices[3]);
+
+			vertices[0] = new_corner
+			vertices[1] = utils.lineLineIntersectionGeneral(new_top_line.a,new_top_line.b,new_top_line.c,line_right.a,line_right.b,line_right.c)
+			vertices[3] = utils.lineLineIntersectionGeneral(new_left_line.a,new_left_line.b,new_left_line.c,line_bottom.a,line_bottom.b,line_bottom.c)
+
+			object.applyVertices(vertices,true);
+		}else if(corner == 'top_right'){
+			if(snapping_line){
+				var diagonal = utils.getGeneralLineFromLineSegment(
+					sw_point,ne_point
+				);
+				var snap_general_line = utils.getGeneralLineFromLineSegment(
+					snapping_line[0],snapping_line[1]
+				);
+				if(!utils.areLinesAlmostParallel(diagonal.a,diagonal.b,snap_general_line.a,snap_general_line.b)){
+					var new_corner = utils.lineLineIntersectionGeneral(diagonal.a,diagonal.b,diagonal.c,snap_general_line.a,snap_general_line.b,snap_general_line.c)
+				}
+			}
+
+			if(!new_corner){
+				var new_corner = utils.projectPointOnLine(mouseX, mouseY,
+					ne_point.x,ne_point.y,
+					sw_point.x,sw_point.y);
+			}
+
+			var new_top_line = utils.getGeneralLineFromLineSegment(
+				new_corner,{x:new_corner.x + Math.cos(angle_right)*100,y:new_corner.y + Math.sin(angle_right)*100}
+			);
+
+			var new_right_line = utils.getGeneralLineFromLineSegment(
+				new_corner,{x:new_corner.x + Math.cos(angle_bottom)*100,y:new_corner.y + Math.sin(angle_bottom)*100}
+			);
+
+			var line_left = utils.getGeneralLineFromLineSegment(vertices[3],vertices[0]);
+			var line_bottom = utils.getGeneralLineFromLineSegment(vertices[2],vertices[3]);
+
+			vertices[1] = new_corner
+			vertices[0] = utils.lineLineIntersectionGeneral(new_top_line.a,new_top_line.b,new_top_line.c,line_left.a,line_left.b,line_left.c)
+			vertices[2] = utils.lineLineIntersectionGeneral(new_right_line.a,new_right_line.b,new_right_line.c,line_bottom.a,line_bottom.b,line_bottom.c)
+
+			object.applyVertices(vertices,true);
+		}else if(corner == 'bottom_right'){
+			if(snapping_line){
+				var diagonal = utils.getGeneralLineFromLineSegment(
+					se_point,nw_point
+				);
+				var snap_general_line = utils.getGeneralLineFromLineSegment(
+					snapping_line[0],snapping_line[1]
+				);
+				if(!utils.areLinesAlmostParallel(diagonal.a,diagonal.b,snap_general_line.a,snap_general_line.b)){
+					var new_corner = utils.lineLineIntersectionGeneral(diagonal.a,diagonal.b,diagonal.c,snap_general_line.a,snap_general_line.b,snap_general_line.c)
+				}
+			}
+
+			if(!new_corner){
+				var new_corner = utils.projectPointOnLine(mouseX, mouseY,
+					se_point.x,se_point.y,
+					nw_point.x,nw_point.y);
+			}
+
+			var new_bottom_line = utils.getGeneralLineFromLineSegment(
+				new_corner,{x:new_corner.x + Math.cos(angle_right)*100,y:new_corner.y + Math.sin(angle_right)*100}
+			);
+
+			var new_right_line = utils.getGeneralLineFromLineSegment(
+				new_corner,{x:new_corner.x + Math.cos(angle_bottom)*100,y:new_corner.y + Math.sin(angle_bottom)*100}
+			);
+
+			var line_left = utils.getGeneralLineFromLineSegment(vertices[3],vertices[0]);
+			var line_top = utils.getGeneralLineFromLineSegment(vertices[0],vertices[1]);
+
+			vertices[2] = new_corner
+			vertices[1] = utils.lineLineIntersectionGeneral(new_right_line.a,new_right_line.b,new_right_line.c,line_top.a,line_top.b,line_top.c)
+			vertices[3] = utils.lineLineIntersectionGeneral(new_bottom_line.a,new_bottom_line.b,new_bottom_line.c,line_left.a,line_left.b,line_left.c)
+
+			object.applyVertices(vertices,true);
+		}else if(corner == 'bottom_left'){
+			if(snapping_line){
+				var diagonal = utils.getGeneralLineFromLineSegment(
+					sw_point,ne_point
+				);
+				var snap_general_line = utils.getGeneralLineFromLineSegment(
+					snapping_line[0],snapping_line[1]
+				);
+				if(!utils.areLinesAlmostParallel(diagonal.a,diagonal.b,snap_general_line.a,snap_general_line.b)){
+					var new_corner = utils.lineLineIntersectionGeneral(diagonal.a,diagonal.b,diagonal.c,snap_general_line.a,snap_general_line.b,snap_general_line.c)
+				}
+			}
+
+			if(!new_corner){
+				var new_corner = utils.projectPointOnLine(mouseX, mouseY,
+					ne_point.x,ne_point.y,
+					sw_point.x,sw_point.y);
+			}
+
+			var new_bottom_line = utils.getGeneralLineFromLineSegment(
+				new_corner,{x:new_corner.x + Math.cos(angle_right)*100,y:new_corner.y + Math.sin(angle_right)*100}
+			);
+
+			var new_left_line = utils.getGeneralLineFromLineSegment(
+				new_corner,{x:new_corner.x + Math.cos(angle_bottom)*100,y:new_corner.y + Math.sin(angle_bottom)*100}
+			);
+
+			var line_right = utils.getGeneralLineFromLineSegment(vertices[1],vertices[2]);
+			var line_top = utils.getGeneralLineFromLineSegment(vertices[0],vertices[1]);
+
+			vertices[3] = new_corner
+			vertices[0] = utils.lineLineIntersectionGeneral(new_left_line.a,new_left_line.b,new_left_line.c,line_top.a,line_top.b,line_top.c)
+			vertices[2] = utils.lineLineIntersectionGeneral(new_bottom_line.a,new_bottom_line.b,new_bottom_line.c,line_right.a,line_right.b,line_right.c)
+
+			object.applyVertices(vertices,true);
+		}
+
+		if(object.type == 'group'){
+			object.updateGroupObjects()
+			for (var i = 0; i < object.group_details.object_data.length; i++) {
+				var child = object.group_details.object_data[i].object
+				if(child.type == 'text'){
+					child.text_details.letterSpacing *= (child.height/oldHeight[i])
+					var oldLineHeight = child.text_details.lineHeight
+					child.text_details.lineHeight *= (child.height/oldHeight[i])
+					child.text_details.fontSize = ((Number(child.text_details.fontSize) + Number(oldLineHeight))*child.height/oldHeight[i]) - Number(child.text_details.lineHeight)
+				}
+			}
+		}
+
+		if(object.type == 'text'){
+			object.text_details.letterSpacing *= (object.height/oldHeight)
+			var oldLineHeight = object.text_details.lineHeight
+			object.text_details.lineHeight *= (object.height/oldHeight)
+			object.text_details.fontSize = ((Number(object.text_details.fontSize) + Number(oldLineHeight))*object.height/oldHeight) - Number(object.text_details.lineHeight)
+		}
+
+		object.set_redraw()
+		scope.needs_redraw = true
+	}
+
+
+	cropOrRotate(object,corner,mouseX,mouseY,snapping_line){
+		var scope = this;
+		var vertices = object.getVertices();
+
+		var n_point = {x:(vertices[0].x+vertices[1].x)/2,y:(vertices[0].y+vertices[1].y)/2}
+		var e_point = {x:(vertices[1].x+vertices[2].x)/2,y:(vertices[1].y+vertices[2].y)/2}
+		var s_point = {x:(vertices[2].x+vertices[3].x)/2,y:(vertices[2].y+vertices[3].y)/2}
+		var w_point = {x:(vertices[3].x+vertices[0].x)/2,y:(vertices[3].y+vertices[0].y)/2}
+
+		var nw_point = {x:vertices[0].x,y:vertices[0].y}
+		var ne_point = {x:vertices[1].x,y:vertices[1].y}
+		var se_point = {x:vertices[2].x,y:vertices[2].y}
+		var sw_point = {x:vertices[3].x,y:vertices[3].y}
+
+		var angle_right = Math.atan2(vertices[1].y - vertices[0].y,vertices[1].x - vertices[0].x)
+		var angle_bottom = Math.atan2(vertices[3].y - vertices[0].y,vertices[3].x - vertices[0].x)
+
+		if(corner == 'top'){
+			if(snapping_line){
+				var diagonal = utils.getGeneralLineFromLineSegment(
+					n_point,s_point
+				);
+				var snap_general_line = utils.getGeneralLineFromLineSegment(
+					snapping_line[0],snapping_line[1]
+				);
+				if(!utils.areLinesAlmostParallel(diagonal.a,diagonal.b,snap_general_line.a,snap_general_line.b)){
+					var new_corner = utils.lineLineIntersectionGeneral(diagonal.a,diagonal.b,diagonal.c,snap_general_line.a,snap_general_line.b,snap_general_line.c)
+				}
+			}
+
+			if(!new_corner){
+				var new_corner = utils.projectPointOnLine(mouseX, mouseY,
+					n_point.x,n_point.y,
+					s_point.x,s_point.y);
+			}
+			var new_top_line = utils.getGeneralLineFromLineSegment(
+				new_corner,{x:new_corner.x + Math.cos(angle_right)*100,y:new_corner.y + Math.sin(angle_right)*100}
+			);
+
+			var line_left = utils.getGeneralLineFromLineSegment(vertices[3],vertices[0]);
+			var line_right = utils.getGeneralLineFromLineSegment(vertices[1],vertices[2]);
+
+			vertices[0] = utils.lineLineIntersectionGeneral(new_top_line.a,new_top_line.b,new_top_line.c,line_left.a,line_left.b,line_left.c)
+			vertices[1] = utils.lineLineIntersectionGeneral(new_top_line.a,new_top_line.b,new_top_line.c,line_right.a,line_right.b,line_right.c)
+
+			object.applyVertices(vertices,true,true,corner);
+			if(object.class_type == 'image'){
+				scope.fillImageCropGaps(object);
+			}
+			if(object.type == 'grid'){
+				for (var i = 0; i < object.grid_details.boxes.length; i++) {
+					if(object.grid_details.boxes[i].image){
+						object.grid_details.boxes[i].image.width = (object.grid_details.boxes[i].width/100)*object.width
+						object.grid_details.boxes[i].image.height = (object.grid_details.boxes[i].height/100)*object.height
+						scope.fillImageCropGaps(object.grid_details.boxes[i].image);
+					}
+				}
+			}
+		}else if(corner == 'right'){
+			if(snapping_line){
+				var diagonal = utils.getGeneralLineFromLineSegment(
+					w_point,e_point
+				);
+				var snap_general_line = utils.getGeneralLineFromLineSegment(
+					snapping_line[0],snapping_line[1]
+				);
+				if(!utils.areLinesAlmostParallel(diagonal.a,diagonal.b,snap_general_line.a,snap_general_line.b)){
+					var new_corner = utils.lineLineIntersectionGeneral(diagonal.a,diagonal.b,diagonal.c,snap_general_line.a,snap_general_line.b,snap_general_line.c)
+				}
+			}
+			if(!new_corner){
+				var new_corner = utils.projectPointOnLine(mouseX, mouseY,
+					w_point.x,w_point.y,
+					e_point.x,e_point.y);
+			}
+
+			var new_right_line = utils.getGeneralLineFromLineSegment(
+				new_corner,{x:new_corner.x + Math.cos(angle_bottom)*100,y:new_corner.y + Math.sin(angle_bottom)*100}
+			);
+
+			var line_top = utils.getGeneralLineFromLineSegment(vertices[0],vertices[1]);
+			var line_bottom = utils.getGeneralLineFromLineSegment(vertices[2],vertices[3]);
+
+			vertices[1] = utils.lineLineIntersectionGeneral(new_right_line.a,new_right_line.b,new_right_line.c,line_top.a,line_top.b,line_top.c)
+			vertices[2] = utils.lineLineIntersectionGeneral(new_right_line.a,new_right_line.b,new_right_line.c,line_bottom.a,line_bottom.b,line_bottom.c)
+
+			object.applyVertices(vertices,true,true,corner);
+			if(object.class_type == 'image'){
+				scope.fillImageCropGaps(object);
+			}
+			if(object.type == 'grid'){
+				for (var i = 0; i < object.grid_details.boxes.length; i++) {
+					if(object.grid_details.boxes[i].image){
+						object.grid_details.boxes[i].image.width = (object.grid_details.boxes[i].width/100)*object.width
+						object.grid_details.boxes[i].image.height = (object.grid_details.boxes[i].height/100)*object.height
+						scope.fillImageCropGaps(object.grid_details.boxes[i].image);
+					}
+				}
+			}
+		}else if(corner == 'bottom'){
+			if(snapping_line){
+				var diagonal = utils.getGeneralLineFromLineSegment(
+					n_point,s_point
+				);
+				var snap_general_line = utils.getGeneralLineFromLineSegment(
+					snapping_line[0],snapping_line[1]
+				);
+				if(!utils.areLinesAlmostParallel(diagonal.a,diagonal.b,snap_general_line.a,snap_general_line.b)){
+					var new_corner = utils.lineLineIntersectionGeneral(diagonal.a,diagonal.b,diagonal.c,snap_general_line.a,snap_general_line.b,snap_general_line.c)
+				}
+			}
+
+			if(!new_corner){
+				var new_corner = utils.projectPointOnLine(mouseX, mouseY,
+					n_point.x,n_point.y,
+					s_point.x,s_point.y);
+			}
+
+			var new_bottom_line = utils.getGeneralLineFromLineSegment(
+				new_corner,{x:new_corner.x + Math.cos(angle_right)*100,y:new_corner.y + Math.sin(angle_right)*100}
+			);
+
+			var line_left = utils.getGeneralLineFromLineSegment(vertices[3],vertices[0]);
+			var line_right = utils.getGeneralLineFromLineSegment(vertices[1],vertices[2]);
+
+			vertices[3] = utils.lineLineIntersectionGeneral(new_bottom_line.a,new_bottom_line.b,new_bottom_line.c,line_left.a,line_left.b,line_left.c)
+			vertices[2] = utils.lineLineIntersectionGeneral(new_bottom_line.a,new_bottom_line.b,new_bottom_line.c,line_right.a,line_right.b,line_right.c)
+
+			object.applyVertices(vertices,true,true,corner);
+			if(object.class_type == 'image'){
+				scope.fillImageCropGaps(object);
+			}
+			if(object.type == 'grid'){
+				for (var i = 0; i < object.grid_details.boxes.length; i++) {
+					if(object.grid_details.boxes[i].image){
+						object.grid_details.boxes[i].image.width = (object.grid_details.boxes[i].width/100)*object.width
+						object.grid_details.boxes[i].image.height = (object.grid_details.boxes[i].height/100)*object.height
+						scope.fillImageCropGaps(object.grid_details.boxes[i].image);
+					}
+				}
+			}
+		}else if(corner == 'left'){
+			if(snapping_line){
+				var diagonal = utils.getGeneralLineFromLineSegment(
+					w_point,e_point
+				);
+				var snap_general_line = utils.getGeneralLineFromLineSegment(
+					snapping_line[0],snapping_line[1]
+				);
+				if(!utils.areLinesAlmostParallel(diagonal.a,diagonal.b,snap_general_line.a,snap_general_line.b)){
+					var new_corner = utils.lineLineIntersectionGeneral(diagonal.a,diagonal.b,diagonal.c,snap_general_line.a,snap_general_line.b,snap_general_line.c)
+				}
+			}
+			if(!new_corner){
+				var new_corner = utils.projectPointOnLine(mouseX, mouseY,
+					w_point.x,w_point.y,
+					e_point.x,e_point.y);
+			}
+
+			var new_left_line = utils.getGeneralLineFromLineSegment(
+				new_corner,{x:new_corner.x + Math.cos(angle_bottom)*100,y:new_corner.y + Math.sin(angle_bottom)*100}
+			);
+
+			var line_top = utils.getGeneralLineFromLineSegment(vertices[0],vertices[1]);
+			var line_bottom = utils.getGeneralLineFromLineSegment(vertices[2],vertices[3]);
+
+			vertices[0] = utils.lineLineIntersectionGeneral(new_left_line.a,new_left_line.b,new_left_line.c,line_top.a,line_top.b,line_top.c)
+			vertices[3] = utils.lineLineIntersectionGeneral(new_left_line.a,new_left_line.b,new_left_line.c,line_bottom.a,line_bottom.b,line_bottom.c)
+
+			object.applyVertices(vertices,true,true,corner);
+			if(object.class_type == 'image'){
+				scope.fillImageCropGaps(object);
+			}
+			if(object.type == 'grid'){
+				for (var i = 0; i < object.grid_details.boxes.length; i++) {
+					if(object.grid_details.boxes[i].image){
+						object.grid_details.boxes[i].image.width = (object.grid_details.boxes[i].width/100)*object.width
+						object.grid_details.boxes[i].image.height = (object.grid_details.boxes[i].height/100)*object.height
+						scope.fillImageCropGaps(object.grid_details.boxes[i].image);
+					}
+				}
+			}
+		}else if(corner == 'rotate'){
+			var angle0 = Math.atan2(100,0);
+			var center = object.getCenter()
+			var angle = Math.atan2(mouseY - center.y,mouseX - center.x);
+
+			var new_angle = utils.moduloTwoPI(angle - angle0);
+			if(Math.abs(new_angle - 2*Math.PI)<0.075 || Math.abs(new_angle)<0.075){
+				new_angle = 0
+			}else if(Math.abs(new_angle - 0.5*Math.PI)<0.075){
+				new_angle = 0.5*Math.PI
+			}else if(Math.abs(new_angle - 1.5*Math.PI)<0.075){
+				new_angle = 1.5*Math.PI
+			}else if(Math.abs(new_angle - Math.PI)<0.075){
+				new_angle = Math.PI
+			}
+
+
+			object.rotation = new_angle
+		}
+
+		if(object.type == 'group'){
+			object.updateGroupObjects()
+		}
+
+		object.set_redraw()
+		scope.needs_redraw = true
+
+		var rtt = setTimeout(function(){
+			if(object.type == 'group'){
+				var extra_redraw = false
+				for (var i = 0; i < object.group_details.object_data.length; i++) {
+					var o = object.group_details.object_data[i].object
+					if(o.type == 'text'){
+						o.set_redraw()
+						extra_redraw = true
+					}
+				}
+
+				if(extra_redraw){
+					scope.needs_redraw = true
+				}
+			}
+
+			clearTimeout(rtt)
+		},30)
+
+	}
+
+	fillImageCropGaps (object){
+		var scope = this;
+		if(scope.cropFillGapChanges[object.id]){
+			object.image_details.image_width -= scope.cropFillGapChanges[object.id].image_width
+			object.image_details.image_height -= scope.cropFillGapChanges[object.id].image_height
+			object.image_details.contentDisplacement.x -= scope.cropFillGapChanges[object.id].content_displacement_x
+			object.image_details.contentDisplacement.y -= scope.cropFillGapChanges[object.id].content_displacement_y
+		}
+
+		var old_image_width = object.image_details.image_width;
+		var old_image_height = object.image_details.image_height;
+		var old_content_displacement_x = object.image_details.contentDisplacement.x;
+		var old_content_displacement_y = object.image_details.contentDisplacement.y;
+
+		if(object.image_details.contentDisplacement.x > 0){
+			var gap = object.image_details.contentDisplacement.x;
+			object.image_details.contentDisplacement.x = 0;
+			var aspect = object.image_details.image_width/object.image_details.image_height
+			object.image_details.image_width = object.width;
+			object.image_details.image_height = object.image_details.image_width/aspect;
+			object.image_details.contentDisplacement.y -= (object.image_details.image_height - old_image_height)/2
+		}
+
+		if(object.image_details.contentDisplacement.y > 0){
+			var gap = object.image_details.contentDisplacement.y;
+			object.image_details.contentDisplacement.y = 0;
+			var aspect = object.image_details.image_width/object.image_details.image_height
+			object.image_details.image_height = object.height;
+			object.image_details.image_width = object.image_details.image_height*aspect;
+			object.image_details.contentDisplacement.x -= (object.image_details.image_width - old_image_width)/2
+		}
+
+		if(object.image_details.contentDisplacement.x + object.image_details.image_width < object.width){
+			var gap = object.width - (object.image_details.contentDisplacement.x + object.image_details.image_width);
+			var aspect = object.image_details.image_width/object.image_details.image_height
+			object.image_details.image_width += gap;
+			object.image_details.image_height = object.image_details.image_width/aspect;
+			object.image_details.contentDisplacement.y -= (object.image_details.image_height - old_image_height)/2
+		}
+
+		if(object.image_details.contentDisplacement.y + object.image_details.image_height < object.height){
+			var gap = object.height - (object.image_details.contentDisplacement.y + object.image_details.image_height);
+			var aspect = object.image_details.image_width/object.image_details.image_height
+			object.image_details.image_height += gap;
+			object.image_details.image_width = object.image_details.image_height*aspect;
+			object.image_details.contentDisplacement.x -= (object.image_details.image_width - old_image_width)/2
+		}
+
+		if(!scope.cropFillGapChanges[object.id]){
+			scope.cropFillGapChanges[object.id] = {
+				image_width:0,
+				image_height:0,
+				content_displacement_x:0,
+				content_displacement_y:0,
+			}
+		}
+
+		scope.cropFillGapChanges[object.id].image_width = object.image_details.image_width - old_image_width
+		scope.cropFillGapChanges[object.id].image_height = object.image_details.image_height - old_image_height
+		scope.cropFillGapChanges[object.id].content_displacement_x = object.image_details.contentDisplacement.x - old_content_displacement_x
+		scope.cropFillGapChanges[object.id].content_displacement_y = object.image_details.contentDisplacement.y - old_content_displacement_y
+	}
+
+
+
+	moveObject(object,initialObject,shiftX,shiftY){
+		object.position.x = initialObject.position.x + shiftX;
+		object.position.y = initialObject.position.y + shiftY;
+
+		var snap = this.checkSnapWithObject(object);
+		object.position.x += snap.x
+		object.position.y += snap.y
+
+		if(object.type == 'group'){
+			object.updateGroupObjects()
+		}
+
+		// if(object.type == 'grid'){
+		// 	object.updateGridBoxes()
+		// }
+
+		if(object.type == 'group'){
+			object.set_redraw()
+		}
+
+		this.needs_redraw = true;
+	}
+
+	overlappedGridBox(x,y){
+		var grids = this.active_page.objects.filter(function(o){
+			return o.type == 'grid';
+		})
+
+		grids = _.sortBy(grids,function(o){
+	        return -o.layer_index;
+	    })
+
+		for (var i = 0; i < grids.length; i++) {
+			for(var j=0;j<grids[i].grid_details.boxes.length;j++){
+				var vertices = grids[i].grid_details.boxes[j].getVertices()
+				vertices = vertices.map(function(o){
+					o.x==0?o.x +=0.001:null;
+					return o
+				})
+				if(utils.pointInPolygonWithPadding(40,this.mouseX,this.mouseY,vertices,100000,100000)){
+					return grids[i].grid_details.boxes[j]
+				}
+			}
+		}
+	}
+
+	getCropObject(){
+	    if(this.mode == 'crop' && this.activeCropImage){
+			if(this.activeCropImage.get_parent('grid')){
+				return this.activeCropImage.get_parent('grid')
+			}else{
+				return this.activeCropImage
+			}
+		}
+
+		return null;
+	}
+
+	findActiveElement(){
+		var tolerance = this.design.convertPixelToCm(20);
+		var scope = this;
+		
+		
+		//finding non crop mode control points and move mode selection
+		var ordered_objects = this.active_page.objects.concat(this.active_page.groups);
+		var ordered_objects = _.sortBy(ordered_objects,function(o){
+			if(o.type == 'group'){
+				// var group_layer_index = _.maxBy(o.group_details.object_data,function(p){
+				// 	return p.object.layer_index;
+				// })
+				// if(group_layer_index){
+				// 	group_layer_index = group_layer_index.object.layer_index;
+				// }else{
+				// 	return 100000000;
+				// }
+				// return group_layer_index;
+				return -100000;
+			}else{
+				return o.layer_index;
+			}
+		})
+
+		ordered_objects.reverse();
+
+		if(this.temporary_group){
+			ordered_objects.push(this.temporary_group)
+		}
+
+		var oldElement = this.activeElement
+		this.activeElement = null
+
+		var object_found = scope.getCropObject();
+
+		if(object_found){
+			ordered_objects = [object_found]
+		}
+
+		for(var i=0;i<ordered_objects.length;i++){
+			var handle_tolerance = 20;
+			var object = ordered_objects[i]
+			var vertices = object.getVertices();
+			var image_vertices;
+			if(object.type == "image"){
+				image_vertices = object.getImageCropVertices();
+			}
+			var rotation_vertex = object.getRotationPoint();
+
+			if(object.height < 40 || object.width < 40){
+				handle_tolerance /= 2;
+			}
+
+			if(object.getGroup() && scope.mode != 'crop'){
+				continue;
+			}
+
+
+			if(!((scope.mode == 'crop' && object_found) || (scope.selection && (scope.selection.object.getGroup() == object || scope.selection.object == object || (scope.selection.object.get_parent("grid") && scope.selection.object.get_parent("grid") == object ))    ))){
+				continue
+			}
+
+
+			if(scope.mode == 'crop' && scope.activeCropImage && object.type == 'grid'){
+				var boxes = object.grid_details.boxes
+				var imgs = [];
+				for(var j=0;j<boxes.length;j++){
+					if(boxes[j].image){
+						imgs.push(boxes[j].image);
+					}
+				}
+
+				for(var j=0;j<imgs.length;j++){
+					var box_image_vertices;
+					var box = imgs[j].get_parent('box');
+					if(box){
+						box_image_vertices = box.getImageCropVertices();
+					}
+
+					if(box_image_vertices && scope.activeCropImage == imgs[j]){
+						if(utils.distance(this.mouseX,this.mouseY,box_image_vertices[0].x,box_image_vertices[0].y)<tolerance){
+							scope.activeElement = {
+								object: imgs[j],
+								corner: 'top_left_crop_2'
+							}
+							scope.needs_redraw = true;
+							return;
+						}else if(utils.distance(this.mouseX,this.mouseY,box_image_vertices[1].x,box_image_vertices[1].y)<tolerance){
+							scope.activeElement = {
+								object: imgs[j],
+								corner: 'top_right_crop_2'
+							}
+							scope.needs_redraw = true;
+							return;
+						}else if(utils.distance(this.mouseX,this.mouseY,box_image_vertices[2].x,box_image_vertices[2].y)<tolerance){
+							scope.activeElement = {
+								object: imgs[j],
+								corner: 'bottom_right_crop_2'
+							}
+							scope.needs_redraw = true;
+							return;
+						}else if(utils.distance(this.mouseX,this.mouseY,box_image_vertices[3].x,box_image_vertices[3].y)<tolerance){
+							scope.activeElement = {
+								object: imgs[j],
+								corner: 'bottom_left_crop_2'
+							}
+							scope.needs_redraw = true;
+							return;
+						}
+					}
+				}
+			}
+
+			//top, left, right and bottom control points
+			var cond1 = object.type!="text";
+			var cond2 = !(object.type == 'grid' && object.sub_type=='frame');
+			var cond3 = !(object.type=='group' && _.findIndex(object.group_details.object_data,function(o){return o.object.type=='text' || (o.object.type=='grid' && o.object.sub_type=='frame' )})>-1 );
+			var cond4 = !(object.type=='group' && _.findIndex(object.group_details.object_data,function(o){return o.object.type=='grid' && o.object.sub_type=='frame'})>-1 );
+			
+			if(cond1 && cond2 && cond3 && utils.distance(this.mouseX,this.mouseY,(vertices[0].x+vertices[1].x)/2,(vertices[0].y+vertices[1].y)/2)<handle_tolerance){
+				this.activeElement = {
+					object: object,
+					corner: 'top'
+				}
+				this.needs_redraw = true;
+				return;
+			}else if(cond2 && cond4 && utils.distance(this.mouseX,this.mouseY,(vertices[1].x+vertices[2].x)/2,(vertices[1].y+vertices[2].y)/2)<handle_tolerance){
+				this.activeElement = {
+					object: object,
+					corner: 'right'
+				}
+				this.needs_redraw = true;
+				return;
+			}else if(cond1 && cond2 && cond3 && utils.distance(this.mouseX,this.mouseY,(vertices[2].x+vertices[3].x)/2,(vertices[2].y+vertices[3].y)/2)<handle_tolerance){
+				this.activeElement = {
+					object: object,
+					corner: 'bottom'
+				}
+				this.needs_redraw = true;
+				return;
+			}else if(cond2 && cond4 && utils.distance(this.mouseX,this.mouseY,(vertices[3].x+vertices[0].x)/2,(vertices[3].y+vertices[0].y)/2)<handle_tolerance){
+				this.activeElement = {
+					object: object,
+					corner: 'left'
+				}
+				this.needs_redraw = true;
+				return;
+			}else if(utils.distance(this.mouseX,this.mouseY,vertices[0].x,vertices[0].y)<handle_tolerance){
+				if(scope.mode == 'crop' && scope.activeCropImage == object){
+					scope.activeElement = {
+						object: object,
+						corner: 'top_left_crop'
+					}
+				}else{
+					this.activeElement = {
+						object: object,
+						corner: 'top_left'
+					}
+				}
+				
+				this.needs_redraw = true;
+				return;
+			}else if(utils.distance(this.mouseX,this.mouseY,vertices[1].x,vertices[1].y)<handle_tolerance){
+				if(scope.mode == 'crop' && scope.activeCropImage == object){
+					scope.activeElement = {
+						object: object,
+						corner: 'top_right_crop'
+					}
+				}else{
+					this.activeElement = {
+						object: object,
+						corner: 'top_right'
+					}
+				}
+				this.needs_redraw = true;
+				return;
+			}else if(utils.distance(this.mouseX,this.mouseY,vertices[2].x,vertices[2].y)<handle_tolerance){
+				if(scope.mode == 'crop' && scope.activeCropImage == object){
+					scope.activeElement = {
+						object: object,
+						corner: 'bottom_right_crop'
+					}
+				}else{
+					this.activeElement = {
+						object: object,
+						corner: 'bottom_right'
+					}
+				}
+				this.needs_redraw = true;
+				return;
+			}else if(utils.distance(this.mouseX,this.mouseY,vertices[3].x,vertices[3].y)<handle_tolerance){
+				if(scope.mode == 'crop' && scope.activeCropImage == object){
+					scope.activeElement = {
+						object: object,
+						corner: 'bottom_left_crop'
+					}
+				}else{
+					this.activeElement = {
+						object: object,
+						corner: 'bottom_left'
+					}
+				}
+				
+				this.needs_redraw = true;
+				return;
+			}else if(scope.mode == 'crop' && scope.activeCropImage == object && image_vertices && utils.distance(this.mouseX,this.mouseY,image_vertices[0].x,image_vertices[0].y)<handle_tolerance){
+				scope.activeElement = {
+					object: object,
+					corner: 'top_left_crop_2'
+				}
+				scope.needs_redraw = true;
+				return;
+			}else if(scope.mode == 'crop' && scope.activeCropImage == object && image_vertices && utils.distance(this.mouseX,this.mouseY,image_vertices[1].x,image_vertices[1].y)<handle_tolerance){
+				scope.activeElement = {
+					object: object,
+					corner: 'top_right_crop_2'
+				}
+				scope.needs_redraw = true;
+				return;
+			}else if(scope.mode == 'crop' && scope.activeCropImage == object && image_vertices && utils.distance(this.mouseX,this.mouseY,image_vertices[2].x,image_vertices[2].y)<handle_tolerance){
+				scope.activeElement = {
+					object: object,
+					corner: 'bottom_right_crop_2'
+				}
+				scope.needs_redraw = true;
+				return;
+			}else if(scope.mode == 'crop' && scope.activeCropImage == object && image_vertices && utils.distance(this.mouseX,this.mouseY,image_vertices[3].x,image_vertices[3].y)<handle_tolerance){
+				scope.activeElement = {
+					object: object,
+					corner: 'bottom_left_crop_2'
+				}
+				scope.needs_redraw = true;
+				return;
+			}else if(utils.distance(this.mouseX,this.mouseY,rotation_vertex.x,rotation_vertex.y)<tolerance){
+				this.activeElement = {
+					object: object,
+					corner: 'rotate'
+				}
+				this.needs_redraw = true;
+				return;
+			}
+		}
+
+		for(var i=0;i<ordered_objects.length;i++){
+			var object = ordered_objects[i]
+
+			if(object.type == 'grid'){
+				var break_loop = false;
+				for(var j=0;j<object.grid_details.boxes.length;j++){
+					var box = object.grid_details.boxes[j];
+					var vertices = box.getVertices();
+					var verticesInCm = deref(vertices).map(function(o){
+						o.x==0?o.x +=0.001:null;
+						return o
+					});
+
+					if(utils.pointInPolygon(this.mouseX,this.mouseY,verticesInCm,100000,100000)){
+						var needs_redraw = (!oldElement || oldElement.object!=box)
+						this.activeElement = {
+							object: box
+						}
+						this.needs_redraw = needs_redraw;
+						break_loop = true;
+						break;
+					}
+				}
+
+				if(break_loop){
+					break;
+				}
+			}else{
+				var vertices = object.getVertices();
+				var verticesInCm = deref(vertices).map(function(o){
+					o.x==0?o.x +=0.001:null;
+					return o
+				});
+
+				if(utils.pointInPolygon(this.mouseX,this.mouseY,verticesInCm,100000,100000)){
+					var needs_redraw = (!oldElement || oldElement.object!=object)
+					this.activeElement = {
+						object: object
+					}	
+					this.needs_redraw = needs_redraw;
+					break;
+				}
+			}
+		}
+
+		if(!this.activeElement){
+			var cond_x = this.mouseX > 0 && this.mouseX < this.design.get_width();
+			var cond_y = this.mouseY > 0 && this.mouseY < this.design.get_height();
+
+			if(cond_x && cond_y){
+				this.activeElement = {
+					object: this.active_page.background
+				}
+			}
+		}
+
+		var needs_redraw = (oldElement==null && this.activeElement!=null) || (oldElement!=null && this.activeElement==null)
+		if(oldElement && this.activeElement){
+			if(oldElement.object != this.activeElement.object || oldElement.corner != this.activeElement.corner){
+				needs_redraw = true
+			}
+		}
+		this.needs_redraw = needs_redraw;
+	}
+
+	addGroup(file,dont_add_undo_and_selection,copy_and_paste){
+		var scope = this;
+		var object_files = file.objects;
+		var group_file = file.group;
+
+		var objects = []
+		for (var i = 0; i < object_files.length; i++) {
+			if(object_files[i].group && object_files[i].objects){
+				objects.push(scope.addGroup(object_files[i],true,copy_and_paste));
+			}else{
+				objects.push(scope.addObject(object_files[i],true,copy_and_paste));
+			}
+		}
+
+		var new_group = new DM_Group();
+		new_group.master = this.active_page;
+		new_group.load(group_file);
+		this.active_page.groups.push(new_group);
+
+		if(!copy_and_paste){
+			var center = new_group.getCenter();
+			var design_center = {x:scope.design.get_width()/2,y:scope.design.get_height()/2}
+			var diff = {x:design_center.x - center.x,y:design_center.y - center.y}
+			new_group.position.x += diff.x
+			new_group.position.y += diff.y
+		}
+		new_group.updateGroupObjects();
+
+		if(!dont_add_undo_and_selection){
+			scope.setSelection({object:new_group})
+		}
+		scope.needs_redraw = true;
+		
+		scope.draw();
+		if(!dont_add_undo_and_selection){
+			scope.addUndoChange();
+		}
+
+		return new_group
+	}
+
+	addObject(object_file,dont_add_undo_and_selection,copy_and_paste){
+		var scope = this;
+		let type = object_file.type;
+		var new_obj
+		switch(type){
+			case "text":
+				new_obj = new DM_Text();
+				break;
+			case "image":
+				new_obj = new DM_Image();
+				break;
+			case "grid":
+				new_obj = new DM_Grid();
+				break;
+		}
+
+		new_obj.master = this.active_page;
+		new_obj.load(object_file);
+
+		new_obj.layer_index = this.active_page.objects.length
+		try{
+			this.active_page.objects.push(new_obj);
+			if(!copy_and_paste && !object_file.position){
+				var center = new_obj.getCenter();
+				var design_center = {x:this.design.get_width()/2,y:this.design.get_height()/2}
+				var diff = {x:design_center.x - center.x,y:design_center.y - center.y}
+				new_obj.position.x += diff.x
+				new_obj.position.y += diff.y
+			}
+
+			if(!dont_add_undo_and_selection){
+				if(new_obj.type == 'image'){
+					var image_cache_id = new_obj.image_cache_id()
+					var loadable = new_obj.image_exists();
+
+					if(loadable){
+						new_obj.draw();
+						scope.design.wait_to_load().then(() => {
+							scope.setSelection({object:new_obj})
+						}).catch(() => {
+							scope.setSelection({object:new_obj})
+						})
+						// if(scope.design.loaded_images[image_cache_id]){
+						// 	scope.setSelection({object:new_obj})
+						// }else if(!scope.design.loading_images[image_cache_id]){
+						// 	scope.design.loading_images[image_cache_id] = true
+						// 	var load_promise = scope.loadImage(new_obj);
+						// 	scope.resource_promise_array.push(load_promise);
+						// 	load_promise.then(function(image_raw){
+						// 		scope.setSelection({object:new_obj})
+						// 		new_obj.loader_image = null;
+						// 		new_obj.set_redraw()
+						// 		scope.needs_redraw = true;
+						// 	})
+						// }
+					}else{
+						scope.setSelection({object:new_obj})
+					}
+				}else{
+					this.setSelection({object:new_obj})
+				}
+			}
+			new_obj.set_redraw()
+			this.needs_redraw = true;
+	        
+	        this.draw();
+			if(!dont_add_undo_and_selection){
+	        	this.addUndoChange()
+	        }
+
+	        return new_obj
+		}catch(err){
+			console.log(err);
+		}
+	}
+
+	isSameSet( arr1, arr2 ) {
+		return  $( arr1 ).not( arr2 ).length === 0 && $( arr2 ).not( arr1 ).length === 0 && arr1.length==arr2.length;  
+	}
+
+	group_already_exists(group){
+		var scope = this;
+		var objs = group.group_details.object_data.map(function(o){return o.object});
+		for (var i = 0; i < scope.active_page.groups.length; i++) {
+			var objs_i = scope.active_page.groups[i].group_details.object_data.map(function(o){return o.object});
+			if(this.isSameSet(objs_i,objs)){
+				return true
+			}
+		}
+
+		return false
+	}
+
+	groupTemporaryGroup(){
+		var scope = this;
+		scope.active_page.groups.push(scope.temporary_group);
+		scope.temporary_group = null;
+		scope.lastSelection = null
+	}
+
+	addObjectToTemporaryGroup(element){
+		var scope = this;
+		if(element.constructor.name != 'Array' && element.object.locked){
+			return
+		}
+
+		if(element.constructor.name == 'Array'){
+			element = element.filter(function(o){return !o.locked})
+		}
+
+		var all_objects = []
+		if(!scope.temporary_group){
+			scope.temporary_group = new DM_Group();
+			scope.temporary_group.master = scope.active_page;
+
+			if(scope.lastSelection){
+				if(scope.lastSelection.object.type == 'group'){
+					all_objects = all_objects.concat( scope.lastSelection.object.group_details.object_data.map(function(o){return o.object}) );
+				}else{
+					all_objects.push(scope.lastSelection.object);
+				}
+			}
+		}
+
+		var concat_array = []
+		if(element.constructor.name == 'Array'){
+			for (var i = 0; i < element.length; i++) {
+				if(element[i].type == 'group'){
+					concat_array = concat_array.concat(element[i].group_details.object_data.map(function(o){return o.object}));
+				}else{
+					concat_array = concat_array.concat(element[i]);
+				}
+			}
+		}else if(element.object.type == 'group'){
+			concat_array = element.object.group_details.object_data.map(function(o){return o.object})
+		}else{
+			concat_array = [element.object]
+		}
+
+		all_objects = all_objects.concat(scope.temporary_group.group_details.object_data.map(function(o){
+			return o.object
+		})).concat(concat_array);
+
+		all_objects = _.uniq(all_objects)
+
+		all_objects = all_objects.map(o => {
+			if(o.get_parent('grid')){
+				return o.get_parent('grid')
+			}else{
+				return o
+			}
+		})
+
+		scope.temporary_group.setGroupFromObjects(all_objects,true);
+		// scope.temporary_group.set_redraw()
+	}
+
+	backToDefaultMode(){
+		this.mode = 'default'
+    	this.initialCropObject = null;
+		this.activeCropImage = null;
+		
+		if(this.crop_mode_image && this.crop_mode_image.parentElement){
+			this.crop_mode_image.parentElement.removeChild(this.crop_mode_image);
+			this.crop_mode_image = null;
+		}
+
+		if(this.crop_mode_dom && this.crop_mode_dom.parentElement){
+			this.crop_mode_dom.parentElement.removeChild(this.crop_mode_dom);
+			this.crop_mode_dom = null;
+		}
+	}
+
+	setCropMode(){
+		var scope = this;
+
+		if(scope.selection){
+			var crop_image
+			if(scope.selection.object.type == "image"){
+				crop_image = scope.selection.object;
+			}else if(scope.selection.object.get_parent('box') && scope.selection.object.get_parent('box').image){
+				crop_image = scope.selection.object.get_parent('box').image;
+			}
+			
+			if(crop_image && crop_image.image_exists()){
+				scope.activeCropImage = crop_image;
+				scope.mode = 'crop'
+				if(scope.activeCropImage.get_parent('grid')){
+					scope.activeCropImage.get_parent('grid').set_redraw();
+				}else{
+					scope.activeCropImage.set_redraw();
+				}
+
+				var cr = scope.getCropObject()
+				if(cr){
+					scope.initialCropObject = cr.save();	
+				}
+
+				scope.crop_mode_image = crop_image.image_dom.cloneNode(true);
+				scope.crop_mode_image.base_transform = crop_image.image_dom.style.transform;
+				scope.crop_mode_image.angle_multiplier = crop_image.image_details.flip_horizontal*crop_image.image_details.flip_vertical;
+				scope.crop_mode_dom = document.createElement('div');
+
+				scope.crop_mode_image.style.zIndex = -2
+				scope.crop_mode_dom.style.zIndex = -1
+
+				scope.crop_mode_image.style.position = 'absolute';
+				scope.crop_mode_dom.style.position = 'absolute';
+				scope.crop_mode_dom.style.boxShadow = "0 0 0 99999px rgba(0, 0, 0, .2)";
+
+				scope.interface_dom.appendChild(scope.crop_mode_dom);
+				scope.interface_dom.appendChild(scope.crop_mode_image);
+
+				scope.needs_redraw = true;
+			}
+		}
+	}
+
+	setSelection(element,multi_selection,crop_mode_doubleclick){
+		var scope = this;
+
+		if(element && !element.object.locked){
+			scope.area_selection = null
+		}else if(scope.mode != "crop"){
+			scope.area_selection = {
+				start: {x:this.mouseX,y:this.mouseY},
+				end: {x:this.mouseX,y:this.mouseY}
+			}
+		}
+
+
+		// if(!element){
+		// 	element = {object:scope.active_page.background};
+		// }
+
+
+		if(element){
+			scope.selection = element
+			if(element.object.get_parent('grid')){
+				scope.initialObject = element.object.get_parent('grid').save();
+			}else if(element.object.getGroup()){
+				scope.initialObject = element.object.getGroup().save();
+			}else{
+				scope.initialObject = element.object.save();
+			}
+
+			if(element.object.class_type!='background' && multi_selection && (scope.temporary_group || (!scope.temporary_group && scope.lastSelection && scope.lastSelection.object != scope.selection.object)) && !(scope.temporary_group && element.object == scope.temporary_group) ){
+				scope.addObjectToTemporaryGroup(element);
+				scope.selection = {object: scope.temporary_group}
+			}else if(!multi_selection && element.object!=scope.temporary_group && (!element.object.getGroup() || (element.object.getGroup() && element.object.getGroup()!= scope.temporary_group))){
+				scope.temporary_group = null;
+			}
+
+			this.backToDefaultMode();
+			scope.needs_redraw = true;		
+
+			if(crop_mode_doubleclick){
+				this.setCropMode();
+			}
+
+			var object_to_set = scope.selection.object
+			if(window['set_design_variables']){
+				var toolbar_type = object_to_set.type;
+				if(object_to_set.get_parent('grid')){
+					toolbar_type = 'grid';
+				}else if(object_to_set.class_type == "background"){
+					toolbar_type = "background"
+				}
+				set_design_variables(toolbar_type,object_to_set,scope.detectLabelRules(object_to_set),scope.mode=='crop')
+			}
+		}else{
+			scope.selection = null;
+
+			this.backToDefaultMode();
+			scope.needs_redraw = true;	
+			
+			if(window['set_design_variables']){
+				toolbar_type = ""
+				set_design_variables(toolbar_type,null,'',scope.mode=='crop')
+			}
+		}
+
+		
+
+		
+
+		
+
+		
+
+		scope.lastSelection = element
+	}
+	
+	deselectElements(cancel_crop){
+		var scope = this;
+		if(cancel_crop && scope.mode == 'crop'){
+			if(scope.initialCropObject){
+				if(scope.selection.object.get_parent('grid')){
+	            	scope.selection.object.get_parent('grid').load(scope.initialCropObject)
+				}else{
+	            	scope.selection.object.load(scope.initialCropObject)
+				}
+	        }
+		}
+		scope.selection = null;
+		scope.temporary_group = null;
+		scope.lastSelection = null
+    	scope.activeElement = null;
+    	scope.lastMouseUpSelection = null;
+		scope.initialObject = null;
+		
+		
+    	this.backToDefaultMode()
+
+    	if(window['set_design_variables']){
+			set_design_variables(null,null,null,scope.mode=='crop',undefined,true)
+		}
+
+		// $(textarea_dom).off()
+		// if(textarea_dom.parentElement){
+		// 	textarea_dom.parentElement.removeChild(textarea_dom)
+		// }
+
+		scope.destroyQuill();
+
+		this.needs_redraw = true;
+	}
+
+	setAreaSelection(elements){
+		var scope = this;
+		scope.temporary_group = null
+		scope.lastSelection = null
+		scope.area_selection = null
+		scope.activeElement = null;
+    	scope.lastMouseUpSelection = null;
+
+		scope.addObjectToTemporaryGroup(elements);
+		scope.selection = {object: scope.temporary_group}
+		scope.initialObject = scope.temporary_group.save();
+
+		var object_to_set = scope.selection.object
+
+		if(window['set_design_variables']){
+			set_design_variables(object_to_set.type,object_to_set,scope.detectLabelRules(object_to_set),scope.mode=='crop')
+		}
+		scope.needs_redraw = true;
+	}
+
+	setActivePage(page){
+		if(page.constructor.name == 'String' || page.constructor.name == 'Number'){
+			page = this.design.pages[page]
+		}
+
+		this.active_page = page
+	}
+
+	addUndoChange(){
+		if(this.undo_stack_disabled){
+			return
+		}
+
+		var new_save = this.design.save()
+		var last_version = _.last(this.undoStack)
+		if(!_.isEqual(last_version,new_save)){
+			if(this.undoStack.length>50){
+				this.undoStack.shift();
+			}
+			this.undoStack.push(new_save);
+			this.redoStack = [];
+			if(window['setDesignStatusText']){
+				setDesignStatusText('Saving Changes...')
+			}
+			this.save_backend();
+		}
+	}
+
+	undo(){
+		if(this.undoStack.length>1){
+			this.redoStack.push(this.undoStack.pop());
+			var old_count = this.design.pages.length;
+			this.design.load(_.last(this.undoStack));
+			this.needs_redraw = true;
+
+			if(window['setDesignStatusText']){
+				setDesignStatusText('Saving Changes...')
+			}
+			this.save_backend();
+
+			if(this.design.pages.length!=old_count && window['rct_update_pages']){
+				rct_update_pages(this.design.pages.length)
+			}
+
+			this.deselectElements();
+		}
+	}
+
+	redo(){
+		if(this.redoStack.length>0){
+			this.undoStack.push(this.redoStack.pop());
+			var old_count = this.design.pages.length;
+			this.design.load(_.last(this.undoStack));
+			this.needs_redraw = true;
+
+			if(window['setDesignStatusText']){
+				setDesignStatusText('Saving Changes...')
+			}
+			
+			this.save_backend();
+
+			if(this.design.pages.length!=old_count && window['rct_update_pages']){
+				rct_update_pages(this.design.pages.length)
+			}
+
+			this.deselectElements();
+		}
+	}
+
+	addNewPage(new_doms,page_to_clone){
+		var data = {}
+		if(page_to_clone){
+			data = page_to_clone.save();
+			//cloning ids
+			refresh_ids_struct(data);
+		}
+
+
+		var new_page = new DM_Page();
+		new_page.master = this.design;
+		new_page.load(data);
+		this.design.pages.push(new_page);
+		this.design.draw();
+
+		this.setActivePage(this.design.pages[this.design.pages.length-1])
+		this.addUndoChange()
+		this.deselectElements();
+		this.updateDoms(new_doms)
+	}
+
+	deletePage(page_to_remove){
+		page_to_remove.remove();
+		this.setActivePage(this.design.pages[this.design.pages.length-1])
+		this.addUndoChange()
+		this.deselectElements();
+	}
+
+	movePage(page_index, direction){
+		if(direction == "up" && page_index>0){
+			var temp = this.design.pages[page_index];
+			this.design.pages[page_index] = this.design.pages[page_index-1];
+			this.design.pages[page_index-1] = temp;
+			this.setActivePage(this.design.pages[page_index-1])
+			this.addUndoChange()
+			this.deselectElements();
+		}else if(direction == "down" && page_index<this.design.pages.length-1){
+			var temp = this.design.pages[page_index];
+			this.design.pages[page_index] = this.design.pages[page_index+1];
+			this.design.pages[page_index+1] = temp;
+			this.setActivePage(this.design.pages[page_index+1])
+			this.addUndoChange()
+			this.deselectElements();
+		}
+	}
+
+	updateDoms(new_doms){
+		try{
+			if(new_doms && new_doms.length == this.design.pages.length){
+				for (var i = 0; i < this.design.pages.length; i++) {
+					if(new_doms[i] && new_doms[i].children[1]){
+						new_doms[i].children[1].parentElement.removeChild(new_doms[i].children[1])
+					}
+
+					$(new_doms[i]).append(this.design.pages[i].dom);
+				}
+				this.handleWindowResize()
+			}
+
+			
+		}catch(err){
+			console.log(err);
+		}
+	}
+
+	fix_bbox_bounds(bbox,max_width,max_height){
+		bbox.minX = Math.floor(bbox.minX);
+		bbox.minY = Math.floor(bbox.minY);
+		bbox.maxX = Math.floor(bbox.maxX);
+		bbox.maxY = Math.floor(bbox.maxY);
+		if(bbox.minX <= 1){
+			bbox.minX = 1;
+		}	
+
+		if(bbox.minY <= 1){
+			bbox.minY = 1;
+		}
+
+		if(bbox.maxX >= max_width){
+			bbox.maxX = max_width - 1;
+		}
+
+		if(bbox.maxY >= max_height){
+			bbox.maxY = max_height - 1;
+		}
+
+		if(bbox.maxX - bbox.minX < 1){
+			bbox.maxX = bbox.minX + 1
+		}
+
+		if(bbox.maxY - bbox.minY < 1){
+			bbox.maxY = bbox.minY + 1
+		}
+	}
+
+	save_text_template_admin(text_template_id){
+		var editor = this;
+		if(text_template_id == undefined){
+			console.log('text_template_id not provided');
+			return Promise.reject('text_template_id not provided');
+		}
+
+		var object
+		if(!this.selection || !(this.selection.object.type=='group' || this.selection.object.getGroup())){
+			console.log('no selection or selection is not a group');
+			return Promise.reject('no selection or selection is not a group');
+		}
+
+		if(this.selection.object.type=='group'){
+			object = this.selection.object
+		}else{
+			object = this.selection.object.getGroup();
+		}
+
+		var data = {
+			id: text_template_id,
+			design_file: object.copy()
+		}
+
+		var vertices = object.getVertices();
+		var bbox = utils.get2dBoundingBox(vertices.map(function(o){
+			return {x: editor.design.convertCmToPixel(o.x),y: editor.design.convertCmToPixel(o.y)}
+		}))
+
+		var offset = 10
+
+		var width = bbox.maxX - bbox.minX
+		var height = bbox.maxY - bbox.minY
+
+		bbox.maxX += ((offset/200)*width)
+		bbox.minX -= ((offset/200)*width)
+
+		bbox.maxY += ((offset/200)*width)
+		bbox.minY -= ((offset/200)*width)
+
+		width = bbox.maxX - bbox.minX
+		height = bbox.maxY - bbox.minY
+
+		if(width>height){
+			var diff = width - height;
+			bbox.minY -= (diff/2)
+			bbox.maxY += (diff/2)
+		}else{
+			var diff = height - width;
+			bbox.minX -= (diff/2)
+			bbox.maxX += (diff/2)
+		}
+
+		this.fix_bbox_bounds(bbox,Math.floor(this.design.get_width() * this.design.pixelsPerCm),Math.floor(this.design.get_height() * this.design.pixelsPerCm));
+
+		let html_data = editor.design.pages[0].get_html(true);
+		let rendering_parameters =  { 
+			width: Math.floor(this.design.get_width() * this.design.pixelsPerCm),
+			height: Math.floor(this.design.get_height() * this.design.pixelsPerCm),
+			update_type:'text_template',
+			update_thumbnail: true,
+			model_id: text_template_id,
+			crop: {
+				start_x: bbox.minX,
+				start_y: bbox.minY,
+				width: bbox.maxX - bbox.minX,
+				height: bbox.maxY - bbox.minY
+			}
+		};
+
+		let data_snapshot = { type: 'jpg', html_data, rendering_parameters }
+		var prom_1 = fetch(server_path + 'render/initiate', {method: 'POST','credentials': 'include',headers: {'Content-Type':'application/json'}, body:JSON.stringify(data_snapshot)})
+		var prom_2 = fetch(server_path + 'text_template/update', {method: 'POST','credentials': 'include',headers: {'Content-Type':'application/json'}, body:JSON.stringify(data)})
+
+		return Promise.all([prom_1, prom_2])
+	    .then(function(resp) {
+	    	console.log(resp)
+	    	return Promise.resolve(resp);
+	    })
+	    .catch(function(err) {
+	    	console.log(err);
+	    	return Promise.reject(err);
+	    })
+	}
+
+	save_design_template_admin(design_id){
+		var editor = this;
+		if(design_id == undefined){
+			console.log('design_id not provided');
+			return Promise.reject('design_id not provided');
+		}
+		var data = {
+			id: design_id,
+			design_file: this.design.save()
+		}
+
+		let html_data = editor.design.pages[0].get_html(true);
+		let rendering_parameters =  { width: Math.floor(this.design.get_width() * this.design.pixelsPerCm), height: Math.floor(this.design.get_height() * this.design.pixelsPerCm),update_type:'design', update_thumbnail: true, model_id: design_id };
+		let data_snapshot = { type: 'jpg', html_data, rendering_parameters }
+		var prom_1 = fetch(server_path + 'render/initiate', {method: 'POST','credentials': 'include',headers: {'Content-Type':'application/json'}, body:JSON.stringify(data_snapshot)})
+		var prom_2 = fetch(server_path + 'design/update', {method: 'POST','credentials': 'include',headers: {'Content-Type':'application/json'}, body:JSON.stringify(data)})
+
+
+		return Promise.all([prom_1, prom_2])
+		.then(function(resp) {
+		   console.log(resp)
+		   return Promise.resolve(resp);
+		})
+	    .catch(function(err) {
+	    	console.log(err);
+	    	return Promise.reject(err);
+	    })
+	}
+
+	save_snapshot_debounced = _.debounce(function(data_snapshot){
+		fetch(server_path + 'render/initiate', {method: 'POST','credentials': 'include',headers: {'Content-Type':'application/json'}, body:JSON.stringify(data_snapshot)})
+		// fetch(server_path + 'saved_design/update_thumbnail', {method: 'POST','credentials': 'include',headers: {'Content-Type':'application/json'}, body:JSON.stringify(data_snapshot)})
+		// .then(() => {
+		// 	console.log("snapshot updated")
+		// })
+	},20000);
+
+
+	save_snapshot(data_snapshot){
+		return fetch(server_path + 'render/initiate', {method: 'POST','credentials': 'include',headers: {'Content-Type':'application/json'}, body:JSON.stringify(data_snapshot)})
+		.then(() => {
+			return Promise.resolve()
+		})
+		// return fetch(server_path + 'saved_design/update_thumbnail', {method: 'POST','credentials': 'include',headers: {'Content-Type':'application/json'}, body:JSON.stringify(data_snapshot)})
+		// .then(() => {
+		// 	// console.log("snapshot updated")
+		// 	return Promise.resolve()
+		// })
+
+	}
+
+	save_data_debounced = _.debounce(function(data){
+		fetch(server_path + 'saved_design/update', {method: 'POST','credentials': 'include',headers: {'Content-Type':'application/json'}, body:JSON.stringify(data)})
+		.then(() => {
+			// console.log("data updated");
+			if(window['setDesignStatusText']){
+				setDesignStatusText('All changes saved')
+			}
+		})
+	},3000);
+
+
+	save_data = function(data){
+		return fetch(server_path + 'saved_design/update', {method: 'POST','credentials': 'include',headers: {'Content-Type':'application/json'}, body:JSON.stringify(data)})
+		.then(() => {
+			// console.log("data updated")
+			if(window['setDesignStatusText']){
+				setDesignStatusText('All changes saved')
+			}
+			return Promise.resolve();
+		})
+	}
+
+
+	save_backend = function(dont_debounce){
+		var editor = this;
+		return new Promise(function(resolve,reject){
+			if(!editor.design.design_save_id){
+				return resolve();
+			}
+
+			function continueSave(){
+				var data = {
+					id: editor.design.design_save_id,
+					design_file: editor.design.save()
+				}
+
+				// var data_snapshot = {
+				// 	id: editor.design.design_save_id,
+				// 	thumbnail_data: editor.design.pages[0].export('low')
+				// }
+
+
+			 	let html_data = editor.design.pages[0].get_html(true);
+		        let rendering_parameters =  { width: Math.floor(editor.design.get_width() * editor.design.pixelsPerCm), height: Math.floor(editor.design.get_height() * editor.design.pixelsPerCm),update_type:'saved_design', update_thumbnail: true, model_id: editor.design.design_save_id };
+				let data_snapshot = { type: 'jpg', html_data, rendering_parameters }
+				var prom_save;
+				var prom_snapshot;
+				if(dont_debounce){
+					prom_save = editor.save_data(data);
+					prom_snapshot = editor.save_snapshot(data_snapshot);
+				}else{
+					editor.save_data_debounced(data);
+					prom_save = Promise.resolve();
+
+					editor.save_snapshot_debounced(data_snapshot);
+					prom_snapshot = Promise.resolve();
+				}
+
+			    Promise.all([prom_save,prom_snapshot])
+			    .then(function(){
+			    	resolve();
+			    })
+			}
+
+			var temp_promise_timer
+
+			var promise_timeout = new Promise(function(res_timeout,rej_timeout){
+				temp_promise_timer = setTimeout(function(){
+					res_timeout();
+					clearTimeout(temp_promise_timer)
+				},10000)
+			})
+
+			return Promise.race([editor.design.wait_to_load(),promise_timeout])
+			.then(function(){
+				editor.draw();
+				clearTimeout(temp_promise_timer)
+				return continueSave()
+			}).catch(function(err){
+				console.log('could not save design',err)
+				clearTimeout(temp_promise_timer)
+			})
+		})
+	}
+
+	
+
+	get_drag_point(point){
+		return {
+			x: (point.x - $(this.active_page.dom).offset().left) * this.design.cmPerPixel,
+			y: (point.y - $(this.active_page.dom).offset().top) * this.design.cmPerPixel
+		}
+	}
+
+	getDragDropAction(x,y,drag_type,replace_image){
+		var editor = this;
+		
+		var drag_mouse_x = (x - $(this.active_page.dom).offset().left) * editor.design.cmPerPixel;
+		var drag_mouse_y = (y - $(this.active_page.dom).offset().top) * editor.design.cmPerPixel;
+
+		if(drag_type == 'template'){
+			var vertices = [
+				{x:0.0001,y:0}, //0.0001 because pip fails at exact 0
+				{x:editor.design.get_width(),y:0},
+				{x:editor.design.get_width(),y:editor.design.get_height()},
+				{x:0.0001,y:editor.design.get_height()}
+			]
+			if(utils.pointInPolygon(drag_mouse_x,drag_mouse_y,vertices,100000,100000)){
+				return {
+					enlarge:true,
+					width: 0.9*editor.design.convertCmToPixel(editor.design.get_width()),
+					valid_drop:true
+				}
+			}
+		}else if(drag_type == 'image'){
+			var data
+			if(editor.drag_details){
+				data = editor.drag_details.data;
+			}
+			var vertices = [
+				{x:0.0001,y:0}, //0.0001 because pip fails at exact 0
+				{x:editor.design.get_width(),y:0},
+				{x:editor.design.get_width(),y:editor.design.get_height()},
+				{x:0.0001,y:editor.design.get_height()}
+			]
+			if(utils.pointInPolygon(drag_mouse_x,drag_mouse_y,vertices,100000,100000)){
+				var sorted_objects = _.sortBy(editor.active_page.objects,function(o){
+			        return -o.layer_index
+			    })
+
+			    //background replace check
+			    if(data.sub_type != 'icon'){
+				    var w = editor.design.get_width(); var h = editor.design.get_height();
+					var background_edge_lines = [
+						[{x:0,y:0},{x:w,y:0}],
+						[{x:w,y:0},{x:w,y:h}],
+						[{x:w,y:h},{x:0,y:h}],
+						[{x:0,y:h},{x:0,y:0}]
+					]
+
+					for (var i = 0; i < background_edge_lines.length; i++) {
+						var threshold
+						if(i==0 || i==2){
+							threshold = 0.1*editor.design.get_height()
+						}else{
+							threshold = 0.1*editor.design.get_width()
+						}
+						var distance = utils.pointDistanceFromLine(drag_mouse_x,drag_mouse_y,background_edge_lines[i][0].x,background_edge_lines[i][0].y,background_edge_lines[i][1].x,background_edge_lines[i][1].y)
+
+						// if(distance < threshold){
+						// 	return {
+						// 		vanish: true,
+						// 		valid_drop: true,
+						// 		obj: this.active_page.background,
+						// 		replace_image: replace_image
+						// 	}
+						// }
+					}
+				}
+
+			    for (var i = 0; i < sorted_objects.length; i++) {
+			    	//images replace check
+			    	if((data.sub_type!='icon' && sorted_objects[i].sub_type != 'icon' && sorted_objects[i].type == 'image') || (data.sub_type=='icon' && sorted_objects[i].sub_type == 'icon' && sorted_objects[i].type == 'image')){
+			    		var vertices = sorted_objects[i].getVertices();
+			    		vertices = vertices.map(function(o){
+							o.x==0?o.x +=0.001:null;
+							return o
+						})
+						if(utils.pointInPolygon(drag_mouse_x,drag_mouse_y,vertices,100000,100000)){
+							return {
+								vanish: true,
+								valid_drop: true,
+								obj: sorted_objects[i],
+								replace_image: replace_image
+							}
+								
+						}
+			    	}
+
+			    	//grids and masks replace check
+			    	if(data.sub_type!='icon' && sorted_objects[i].type == 'grid'){
+			    		for(var b=0;b<sorted_objects[i].grid_details.boxes.length;b++){
+			    			var box = sorted_objects[i].grid_details.boxes[b];
+			    			var vertices = box.getVertices()
+				    		vertices = vertices.map(function(o){
+								o.x==0?o.x +=0.001:null;
+								return o
+							})
+
+							if(utils.pointInPolygonWithPadding(40,drag_mouse_x,drag_mouse_y,vertices,100000,100000)){
+								return {
+									vanish: true,
+									valid_drop: true,
+									obj: sorted_objects[i],
+									box: box,
+									replace_image: replace_image
+								}
+							}
+			    		}	
+			    	}
+			    }
+				return {
+					enlarge:true,
+					width: editor.design.convertCmToPixel(editor.design.get_width()*400/800),
+					valid_drop:true
+				}
+			}
+		}else if(drag_type == 'text_template'){
+			var vertices = [
+				{x:0.0001,y:0}, //0.0001 because pip fails at exact 0
+				{x:editor.design.get_width(),y:0},
+				{x:editor.design.get_width(),y:editor.design.get_height()},
+				{x:0.0001,y:editor.design.get_height()}
+			]
+			if(utils.pointInPolygon(drag_mouse_x,drag_mouse_y,vertices,100000,100000)){
+				return {
+					enlarge:true,
+					width: editor.design.convertCmToPixel(editor.design.get_width()*400/800),
+					valid_drop:true
+				}
+			}
+		}else if(drag_type == 'background'){
+			var vertices = [
+				{x:0.0001,y:0}, //0.0001 because pip fails at exact 0
+				{x:editor.design.get_width(),y:0},
+				{x:editor.design.get_width(),y:editor.design.get_height()},
+				{x:0.0001,y:editor.design.get_height()}
+			]
+			if(utils.pointInPolygon(drag_mouse_x,drag_mouse_y,vertices,100000,100000)){
+				return {
+					vanish: true,
+					valid_drop: true,
+					obj: this.active_page.background,
+					replace_image: replace_image
+				}
+			}
+		}else if(drag_type == 'text'){
+			var data
+			if(editor.drag_details){
+				data = editor.drag_details.data;
+			}
+			var vertices = [
+				{x:0.0001,y:0}, //0.0001 because pip fails at exact 0
+				{x:editor.design.get_width(),y:0},
+				{x:editor.design.get_width(),y:editor.design.get_height()},
+				{x:0.0001,y:editor.design.get_height()}
+			]
+			if(utils.pointInPolygon(drag_mouse_x,drag_mouse_y,vertices,100000,100000)){
+				return {
+					enlarge:true,
+					width: editor.design.convertCmToPixel(editor.design.get_width()*data.data.width/800),
+					valid_drop:true
+				}
+			}
+		}else if(drag_type == 'grid'){
+			var vertices = [
+				{x:0.0001,y:0}, //0.0001 because pip fails at exact 0
+				{x:editor.design.get_width(),y:0},
+				{x:editor.design.get_width(),y:editor.design.get_height()},
+				{x:0.0001,y:editor.design.get_height()}
+			]
+			if(utils.pointInPolygon(drag_mouse_x,drag_mouse_y,vertices,100000,100000)){
+				return {
+					enlarge:true,
+					width: editor.design.convertCmToPixel(editor.design.get_width()*600/800),
+					valid_drop:true
+				}
+			}
+		}else if(drag_type == 'frame'){
+			var vertices = [
+				{x:0.0001,y:0}, //0.0001 because pip fails at exact 0
+				{x:editor.design.get_width(),y:0},
+				{x:editor.design.get_width(),y:editor.design.get_height()},
+				{x:0.0001,y:editor.design.get_height()}
+			]
+			if(utils.pointInPolygon(drag_mouse_x,drag_mouse_y,vertices,100000,100000)){
+				return {
+					enlarge:true,
+					width: editor.design.convertCmToPixel(editor.design.get_width()*400/800),
+					valid_drop:true
+				}
+			}
+		}
+
+		return {}
+	}
+
+	style_ghost_image(loader_image){
+		var x = (this.drag_details.raw_x - this.drag_details.offset_x)
+		var y = (this.drag_details.raw_y - this.drag_details.offset_y)
+		var action = this.getDragDropAction(this.drag_details.raw_x,this.drag_details.raw_y,this.drag_details.drag_type,loader_image);
+		if(this.drag_ghost_image && this.drag_details){
+			this.drag_ghost_image.style.transition = 'width 0.1s, height 0.1s'
+			this.drag_ghost_image.style.zIndex = '100000'
+			this.drag_ghost_image.style.position = 'fixed';
+			this.drag_ghost_image.style.left = x + 'px'
+			this.drag_ghost_image.style.top = y + 'px'
+			if(action.enlarge){
+				var aspect = this.drag_details.original_width/this.drag_details.original_height
+				this.drag_ghost_image.style.width = action.width + 'px'
+				this.drag_ghost_image.style.height = (action.width/aspect) + 'px'
+			}else{
+				this.drag_ghost_image.style.width = this.drag_details.original_width + 'px';
+				this.drag_ghost_image.style.height = this.drag_details.original_height + 'px';
+			}
+
+			if(this.drag_details.replace_feedback && this.drag_details.replace_feedback.obj){
+				this.drag_details.replace_feedback.obj.set_redraw()
+				this.needs_redraw = true;
+			}
+
+			//removing old replace image from parentElement
+			if(this.drag_details.replace_feedback && this.drag_details.replace_feedback.replace_image && this.drag_details.replace_feedback.replace_image.parentElement){
+				this.drag_details.replace_feedback.replace_image.parentElement.removeChild(this.drag_details.replace_feedback.replace_image)
+			}
+
+			//redrawing old obj
+			if(this.drag_details.replace_feedback && this.drag_details.replace_feedback.obj){
+				this.drag_details.replace_feedback.obj.set_redraw();
+				this.needs_redraw = true
+			}
+
+
+			if(action.vanish){
+				this.drag_ghost_image.style.display = 'none'
+				this.drag_details.replace_feedback = {
+					obj: action.obj,
+					box: action.box,
+					replace_image: action.replace_image
+				}
+				
+				action.obj.set_redraw()
+			}else{
+				this.drag_ghost_image.style.display = 'block'
+				delete this.drag_details.replace_feedback
+			}
+
+			this.needs_redraw = true;
+		}
+	}
+
+	handleDrop(loader_image){
+		var editor = this
+		if(!this.drag_details){
+			return
+		}
+
+		var data = this.drag_details.data;
+		var action = this.getDragDropAction(this.drag_details.raw_x,this.drag_details.raw_y,this.drag_details.drag_type,loader_image);
+		delete this.drag_details.replace_feedback
+		if(!action.valid_drop){
+			return
+		}
+
+		if(this.drag_details.drag_type == 'template'){
+			var cloned_file = JSON.parse(JSON.stringify(data.data.design_file))
+			for(var i=0;i<cloned_file.pages.length;i++){
+				refresh_ids_struct(cloned_file.pages[i])
+			}
+			editor.design.load(cloned_file,loader_image)
+			rct_update_pages(editor.design.pages.length);
+			editor.needs_redraw = true;
+			editor.addUndoChange()
+			editor.handleWindowResize()
+		}else if(this.drag_details.drag_type == 'image' && (!action.obj || action.obj.class_type != 'background')){
+			if(!action.obj){
+				var position = {x:(this.drag_details.raw_x - this.drag_details.offset_x),y:(this.drag_details.raw_y - this.drag_details.offset_y)}
+				position = this.get_drag_point(position)
+				var aspect = loader_image.clientWidth/loader_image.clientHeight
+				var width = editor.design.get_width()*400/800
+
+				if(data.data.id_123rf){
+					var d = {
+			            type: 'image',
+			            sub_type: data.sub_type,
+			            image_details:{
+			                id_123rf: data.data.id_123rf,
+			                image_width: width,
+			                image_height: width/aspect
+			            },
+			            position: position,
+			            width:width,
+			            height: width/aspect,
+			            loader_image: loader_image
+			        }
+
+			        if(data.data.mockup_id && data.data.inputs){
+	                    d.sub_type = 'mockup'
+	                    d.mockup_details = {
+	                        id: data.data.mockup_id,
+	                        inputs: data.data.inputs
+	                    }
+	                }
+					this.addObject(d)
+				}else if(data.data.id_123rf_plus){
+					var d = {
+			            type: 'image',
+			            sub_type: data.sub_type,
+			            image_details:{
+			                id_123rf_plus: data.data.id_123rf_plus,
+			                image_width: width,
+			                image_height: width/aspect
+			            },
+			            position: position,
+			            width:width,
+			            height: width/aspect,
+			            loader_image: loader_image
+			        }
+
+			        if(data.data.mockup_id && data.data.inputs){
+	                    d.sub_type = 'mockup'
+	                    d.mockup_details = {
+	                        id: data.data.mockup_id,
+	                        inputs: data.data.inputs
+	                    }
+	                }
+					this.addObject(d)
+				}else if(data.data.id_pixlr){
+					var d = {
+			            type: 'image',
+			            sub_type: data.sub_type,
+			            image_details:{
+			                id_pixlr: data.data.id_pixlr,
+			                image_width: width,
+			                image_height: width/aspect
+			            },
+			            position: position,
+			            width:width,
+			            height: width/aspect,
+			            loader_image: loader_image
+			        }
+
+			        if(data.data.mockup_id && data.data.inputs){
+	                    d.sub_type = 'mockup'
+	                    d.mockup_details = {
+	                        id: data.data.mockup_id,
+	                        inputs: data.data.inputs
+	                    }
+	                }
+					this.addObject(d)
+				}else if(data.data.id_unsplash){
+					var d = {
+			            type: 'image',
+			            sub_type: data.sub_type,
+			            image_details:{
+			                id_unsplash: data.data.id_unsplash,
+			                image_width: width,
+			                image_height: width/aspect
+			            },
+			            position: position,
+			            width:width,
+			            height: width/aspect,
+			            loader_image: loader_image
+			        }
+
+			        if(data.data.mockup_id && data.data.inputs){
+	                    d.sub_type = 'mockup'
+	                    d.mockup_details = {
+	                        id: data.data.mockup_id,
+	                        inputs: data.data.inputs
+	                    }
+	                }
+					this.addObject(d)
+				}else if(data.data.resource_id){
+					var d = {
+			            type: 'image',
+			            sub_type: data.sub_type,
+			            image_details:{
+			                resource_id: data.data.resource_id,
+			                image_width: width,
+			                image_height: width/aspect
+			            },
+			            position: position,
+			            width:width,
+			            height: width/aspect,
+			            loader_image: loader_image
+			        }
+
+			        if(data.data.mockup_id && data.data.inputs){
+	                    d.sub_type = 'mockup'
+	                    d.mockup_details = {
+	                        id: data.data.mockup_id,
+	                        inputs: data.data.inputs
+	                    }
+	                }
+					this.addObject(d)
+				}else if(data.data.src){
+					var d = {
+			            type: 'image',
+			            sub_type: data.sub_type,
+			            image_details:{
+			                src: data.data.src,
+			                image_width: width,
+			                image_height: width/aspect
+			            },
+			            position: position,
+			            width:width,
+			            height: width/aspect,
+			            loader_image: loader_image
+			        }
+
+			        if(data.data.mockup_id && data.data.inputs){
+	                    d.sub_type = 'mockup'
+	                    d.mockup_details = {
+	                        id: data.data.mockup_id,
+	                        inputs: data.data.inputs
+	                    }
+	                }
+					this.addObject(d)
+				}
+			}else if(action.obj.type == 'image'){
+				action.obj.reset_image_source()
+	            action.obj.image_details.image_contain = null
+
+	            if(data.data.id_123rf){
+	                action.obj.image_details.id_123rf = data.data.id_123rf
+	            }else if(data.data.id_123rf_plus){
+	                action.obj.image_details.id_123rf_plus = data.data.id_123rf_plus
+	            }else if(data.data.id_pixlr){
+	                action.obj.image_details.id_pixlr = data.data.id_pixlr
+	            }else if(data.data.id_unsplash){
+	                action.obj.image_details.id_unsplash = data.data.id_unsplash
+	            }else if(data.data.resource_id){
+	                action.obj.image_details.resource_id = data.data.resource_id
+	            }else if(data.data.src){
+	                action.obj.image_details.src = data.data.src
+	            }
+
+	            if(data.data.mockup_id && data.data.inputs){
+	                action.obj.sub_type = 'mockup'
+	                action.obj.mockup_details = {
+	                    id: data.data.mockup_id,
+	                    inputs: data.data.inputs
+	                }
+	            }else if(action.obj.sub_type == 'mockup'){
+	            	action.obj.sub_type = null
+	            }
+
+	            action.obj.image_details.image_needs_autoset = true
+	            action.obj.loader_image = loader_image
+				action.obj.set_redraw()
+	            this.draw()
+			}else if(action.obj.type == 'grid' && action.box){
+				if(!action.box.image){
+					action.box.image = new DM_Image();
+					action.box.image.master = action.box;
+				}
+
+				action.box.image.reset_image_source();
+	            action.box.image.image_details.image_contain = null
+
+	            if(data.data.id_123rf){
+	                action.box.image.image_details.id_123rf = data.data.id_123rf
+	            }else if(data.data.id_123rf_plus){
+	                action.box.image.image_details.id_123rf_plus = data.data.id_123rf_plus
+	            }else if(data.data.id_pixlr){
+	                action.box.image.image_details.id_pixlr = data.data.id_pixlr
+	            }else if(data.data.id_unsplash){
+	                action.box.image.image_details.id_unsplash = data.data.id_unsplash
+	            }else if(data.data.resource_id){
+	                action.box.image.image_details.resource_id = data.data.resource_id
+	            }else if(data.data.src){
+	                action.box.image.image_details.src = data.data.src
+	            }
+
+	            if(data.data.mockup_id && data.data.inputs){
+	                action.box.image.sub_type = 'mockup'
+	                action.box.image.mockup_details = {
+	                    id: data.data.mockup_id,
+	                    inputs: data.data.inputs
+	                }
+	            }else if(action.box.image.sub_type == 'mockup'){
+	            	action.box.image.sub_type = null
+	            }
+
+	            action.box.image.image_details.image_needs_autoset = true
+
+	            action.box.loader_image = loader_image
+                action.box.loaded_attached_image = null;
+                action.obj.set_redraw()
+                action.box.image.set_redraw()
+                this.draw()
+			}
+		}else if(this.drag_details.drag_type == 'background' || (this.drag_details.drag_type == 'image' && action.obj.class_type == 'background')){
+			this.active_page.background.reset_image_source()
+	        this.active_page.background.image_details.image_contain = null;
+
+	        if(data.data.id_123rf){
+	            this.active_page.background_image.id_123rf = data.data.id_123rf
+	        }else if(data.data.id_123rf_plus){
+	            this.active_page.background_image.id_123rf_plus = data.data.id_123rf_plus
+	        }else if(data.data.id_pixlr){
+	            this.active_page.background_image.id_pixlr = data.data.id_pixlr
+	        }else if(data.data.id_unsplash){
+	            this.active_page.background_image.id_unsplash = data.data.id_unsplash
+	        }else if(data.data.resource_id){
+	            this.active_page.background_image.resource_id = data.data.resource_id
+	        }else if(data.data.src){
+	            this.active_page.background_image.src = data.data.src
+	        }
+
+	        this.active_page.background.image_details.filter = null
+	        this.active_page.background.reset_filter()
+	        this.active_page.background.reset_bgremoval()
+
+	        if(data.data.mockup_id && data.data.inputs){
+                this.active_page.background_sub_type = 'mockup'
+                this.active_page.background_mockup_details = {
+                    id: data.data.mockup_id,
+                    inputs: data.data.inputs
+                }
+            }else if(this.active_page.background_sub_type == 'mockup'){
+            	this.active_page.background_sub_type = null
+            }
+
+	        this.active_page.background.loader_image = loader_image
+	        this.active_page.background.image_details.image_needs_autoset = true;
+	        this.active_page.background.set_redraw()
+	        this.draw()
+		}else if(this.drag_details.drag_type == 'text'){
+	        var position = {x:(this.drag_details.raw_x - this.drag_details.offset_x),y:(this.drag_details.raw_y - this.drag_details.offset_y)}
+
+			position = this.get_drag_point(position)
+		    data.data.position = position
+			var aspect = data.data.width/data.data.height
+			var width = editor.design.get_width()*data.data.width/800
+			var height = width/aspect
+			var oldHeight = data.data.height
+
+			data.data.width = width
+			data.data.height = height
+
+			data.data.text_details.letterSpacing *= (height/oldHeight)
+			var oldLineHeight = data.data.text_details.lineHeight
+			data.data.text_details.lineHeight *= (height/oldHeight)
+			data.data.text_details.fontSize = ((Number(data.data.text_details.fontSize) + Number(oldLineHeight))*height/oldHeight) - Number(data.data.text_details.lineHeight)
+
+			data.data.loader_image = loader_image
+
+			this.addObject(data.data)
+		}else if(this.drag_details.drag_type == 'text_template'){
+			data.data.design_file.group.id = utils.uuidv4();
+			var id_mapping = {}
+			for (var i = 0; i < data.data.design_file.objects.length; i++) {
+				var old_id = data.data.design_file.objects[i].id
+	            data.data.design_file.objects[i].id = window.utils.uuidv4();
+	            id_mapping[old_id] = data.data.design_file.objects[i].id
+			}
+
+			for (var i = 0; i < data.data.design_file.group.group_details.object_data.length; i++) {
+	            data.data.design_file.group.group_details.object_data[i].object = id_mapping[data.data.design_file.group.group_details.object_data[i].object]
+	        }
+
+	        data.data.design_file.objects = _.sortBy(data.data.design_file.objects,function(o){
+		        return o.layer_index
+		    })
+
+	        var position = {x:(this.drag_details.raw_x - this.drag_details.offset_x),y:(this.drag_details.raw_y - this.drag_details.offset_y)}
+		    var aspect = loader_image.clientWidth/loader_image.clientHeight;
+		    var image_width; var image_height;
+	       
+	        if(action.enlarge){
+		    	image_width = action.width
+		    	image_height = action.width/aspect
+		    }else{
+		    	image_width = loader_image.clientWidth
+		    	image_height = loader_image.clientHeight
+		    }
+
+		    var group_aspect = data.data.design_file.group.width/data.data.design_file.group.height;
+		    if(group_aspect > aspect){
+		    	var group_height = image_width/group_aspect
+		    	position.y += ((image_height - group_height)/2)
+		    }else{
+		    	var group_width = image_height*group_aspect
+		    	position.x += ((image_width - group_width)/2)
+		    }
+
+			position = this.get_drag_point(position)
+		    data.data.design_file.group.position = position
+			
+			var width = editor.design.get_width()*400/800
+			var height = width/group_aspect
+			var oldHeight = data.data.design_file.group.height
+
+			data.data.design_file.group.width = width
+			data.data.design_file.group.height = height
+
+			for (var i = 0; i < data.data.design_file.objects.length; i++) {
+				var child = data.data.design_file.objects[i]
+				if(child.type == 'text'){
+					child.text_details.letterSpacing *= (height/oldHeight)
+					var oldLineHeight = child.text_details.lineHeight
+					child.text_details.lineHeight *= (height/oldHeight)
+					child.text_details.fontSize = ((Number(child.text_details.fontSize) + Number(oldLineHeight))*height/oldHeight) - Number(child.text_details.lineHeight)
+				}
+			}
+
+			this.active_page.addGroup(data.data.design_file,undefined,true)
+		}else if(this.drag_details.drag_type == 'grid'){
+			var position = {x:(this.drag_details.raw_x - this.drag_details.offset_x),y:(this.drag_details.raw_y - this.drag_details.offset_y)}
+			position = this.get_drag_point(position)
+			var width = editor.design.get_width()*600/800
+	        var file = deref(data.data.design_file);
+	        file.position = position
+	        file.width = width
+	        file.height = width;
+
+			this.addObject(file)
+		}else if(this.drag_details.drag_type == 'frame'){
+			var position = {x:(this.drag_details.raw_x - this.drag_details.offset_x),y:(this.drag_details.raw_y - this.drag_details.offset_y)}
+			position = this.get_drag_point(position)
+			var width = editor.design.get_width()*400/800
+	        var file = deref(data.data);
+	        file.position = position
+	        file.width = width
+	        file.height = width;
+
+	        file.grid_details.boxes[0].loader_image_frame = loader_image
+
+			this.addObject(file)
+		}
+	}
+
+	
+	positionObject(object,position){
+		var boundingVertices;var objects_to_position
+		if(object == this.temporary_group){
+			boundingVertices = object.getVertices()
+			objects_to_position = object.group_details.object_data.map(function(o){return o.object});
+		}else{
+			boundingVertices = [
+				{x:0,y:0},
+				{x:this.design.get_width(),y:0},
+				{x:this.design.get_width(),y:this.design.get_height()},
+				{x:0,y:this.design.get_height()}
+			]
+			if(object.getGroup()){
+				objects_to_position = [object.getGroup()]
+			}else{
+				objects_to_position = [object]
+			}
+		}
+
+		for (var i = 0; i < objects_to_position.length; i++) {
+			var vertices = objects_to_position[i].getVertices();
+			var center = objects_to_position[i].getCenter();
+			var bbox = utils.get2dBoundingBox(vertices);
+
+			if(position == 'position_top'){
+				var diff = boundingVertices[0].y - bbox.minY
+				objects_to_position[i].applyVertices(vertices.map(function(o){
+					o.y += diff
+					return o
+				}))
+				objects_to_position[i].set_redraw()
+			}else if(position == 'position_right'){
+				var diff = boundingVertices[1].x - bbox.maxX
+				objects_to_position[i].applyVertices(vertices.map(function(o){
+					o.x += diff
+					return o
+				}))
+				objects_to_position[i].set_redraw()
+			}else if(position == 'position_bottom'){
+				var diff = boundingVertices[3].y - bbox.maxY
+				objects_to_position[i].applyVertices(vertices.map(function(o){
+					o.y += diff
+					return o
+				}))
+				objects_to_position[i].set_redraw()
+			}else if(position == 'position_left'){
+				var diff = boundingVertices[0].x - bbox.minX
+				objects_to_position[i].applyVertices(vertices.map(function(o){
+					o.x += diff
+					return o
+				}))
+				objects_to_position[i].set_redraw()
+			}else if(position == 'position_middle'){
+				var diff = ((boundingVertices[0].y+boundingVertices[3].y)/2) - center.y
+				objects_to_position[i].applyVertices(vertices.map(function(o){
+					o.y += diff
+					return o
+				}))
+				objects_to_position[i].set_redraw()
+			}else if(position == 'position_center'){
+				var diff = ((boundingVertices[0].x+boundingVertices[1].x)/2) - center.x
+				objects_to_position[i].applyVertices(vertices.map(function(o){
+					o.x += diff
+					return o
+				}))
+				objects_to_position[i].set_redraw()
+			}
+		}
+
+		if(object == this.temporary_group){
+			object.setGroupFromObjects(objects_to_position,true)
+		}else if(object.type == 'group' || object.getGroup()){
+			if(object.type == 'group'){
+				object.updateGroupObjects()
+				object.set_redraw()
+			}else{
+				object.getGroup().updateGroupObjects()
+				object.getGroup().set_redraw()
+			}
+		}
+
+		this.needs_redraw = true
+	}
+
+	moveArrows(object,shiftX,shiftY){
+		if(object.getGroup()){
+			object = object.getGroup()
+		}else if(object.get_parent('grid')){
+			object = object.get_parent('grid')
+		}
+		
+		object.position.x += shiftX;
+		object.position.y += shiftY;
+
+		if(object.type == 'group'){
+			object.updateGroupObjects()
+		}
+
+		object.set_redraw();
+	}
+
+	shiftLayerIndex(objects,direction){
+		if(direction == 'up'){
+			for (var i = 0; i < objects.length; i++) {
+				objects[i].layer_index += 2
+			}
+		}else if(direction == 'down'){
+			for (var i = 0; i < objects.length; i++) {
+				objects[i].layer_index -= 2
+			}
+		}else if(direction == 'top'){
+			var local_min_index = Infinity
+			for (var i = 0; i < objects.length; i++) {
+				if(objects[i].layer_index<local_min_index){
+					local_min_index = objects[i].layer_index
+				}
+			}
+
+			var global_max_index = -Infinity
+			for (var i = 0; i < this.active_page.objects.length; i++) {
+				if(objects.indexOf(this.active_page.objects[i])==-1 && this.active_page.objects[i].layer_index>global_max_index){
+					global_max_index = this.active_page.objects[i].layer_index
+				}
+			}
+
+			var jump = (global_max_index - local_min_index) + 1
+
+			for (var i = 0; i < objects.length; i++) {
+				objects[i].layer_index += jump
+			}
+		}else if(direction == 'bottom'){
+			var local_max_index = -Infinity
+			for (var i = 0; i < objects.length; i++) {
+				if(objects[i].layer_index>local_max_index){
+					local_max_index = objects[i].layer_index
+				}
+			}
+
+			var global_min_index = Infinity
+			for (var i = 0; i < this.active_page.objects.length; i++) {
+				if(objects.indexOf(this.active_page.objects[i])==-1 && this.active_page.objects[i].layer_index<global_min_index){
+					global_min_index = this.active_page.objects[i].layer_index
+				}
+			}
+
+			var jump = (global_min_index - local_max_index) - 1
+
+			for (var i = 0; i < objects.length; i++) {
+				objects[i].layer_index += jump
+			}
+		}
+
+		var layer_array = []
+        for (var k = 0; k < this.active_page.objects.length; k++) {
+            var l = this.active_page.objects[k].layer_index;
+            if(!layer_array[l]){layer_array[l] = []}
+
+            layer_array[l].push(this.active_page.objects[k])
+        }
+
+        var min_index = Infinity
+        var max_index = -Infinity
+
+        for (var k = 0; k < this.active_page.objects.length; k++) {
+            if(this.active_page.objects[k].layer_index<min_index){
+                min_index = this.active_page.objects[k].layer_index
+            }
+
+            if(this.active_page.objects[k].layer_index>max_index){
+                max_index = this.active_page.objects[k].layer_index
+            }
+        }
+
+        for(var k=max_index;k>=min_index;k--){
+            var sum = 0;
+            for(var n=k-1;n>=min_index;n--){
+                if(layer_array[n]){
+                    sum += layer_array[n].length
+                }
+            }
+
+            if(layer_array[k]){
+                for(var kl=0;kl<layer_array[k].length;kl++){
+                    layer_array[k][kl].layer_index = (sum+kl)
+                }
+            }
+        }
+	}
+
+	areObjectsAtTop(objects){
+		var global_min_index = Infinity
+		var global_max_index = -Infinity
+		for (var i = 0; i < this.active_page.objects.length; i++) {
+			if(objects.indexOf(this.active_page.objects[i])==-1 && this.active_page.objects[i].layer_index<global_min_index){
+				global_min_index = this.active_page.objects[i].layer_index
+			}
+
+			if(objects.indexOf(this.active_page.objects[i])==-1 && this.active_page.objects[i].layer_index>global_max_index){
+				global_max_index = this.active_page.objects[i].layer_index
+			}
+		}
+
+		for (var i = 0; i < objects.length; i++) {
+			if(objects[i].layer_index<global_max_index){
+				return false
+			}
+		}
+
+		return true
+	}
+
+	areObjectsAtBottom(objects){
+		var global_min_index = Infinity
+		var global_max_index = -Infinity
+		for (var i = 0; i < this.active_page.objects.length; i++) {
+			if(objects.indexOf(this.active_page.objects[i])==-1 && this.active_page.objects[i].layer_index<global_min_index){
+				global_min_index = this.active_page.objects[i].layer_index
+			}
+
+			if(objects.indexOf(this.active_page.objects[i])==-1 && this.active_page.objects[i].layer_index>global_max_index){
+				global_max_index = this.active_page.objects[i].layer_index
+			}
+		}
+
+		for (var i = 0; i < objects.length; i++) {
+			if(objects[i].layer_index>global_min_index){
+				return false
+			}
+		}
+
+		return true
+	}
+
+	detectLabelRules(object){
+		if(object.type == 'image' || object.class_type == "background" || (object.get_parent('box') && object.image)){
+			return 'image'
+		}else if(object.type == 'text'){
+			return 'text'
+		}
+
+		return ''
+	}
+
+	findActivePage(event){
+		var raw_x;
+		var raw_y;
+		if(event.type == "touchstart"){
+			raw_x = event.touches[0].pageX;
+			raw_y = event.touches[0].pageY;
+		}else{
+			raw_x = event.pageX;
+			raw_y = event.pageY;
+		}
+
+		for(var i=0;i<this.design.pages.length;i++){
+			var page_mouse_x = (raw_x - $(this.design.pages[i].dom).offset().left) * this.design.cmPerPixel;
+			var page_mouse_y = (raw_y - $(this.design.pages[i].dom).offset().top) * this.design.cmPerPixel;
+
+			var cond_x = page_mouse_x > 0 && page_mouse_x < this.design.get_width();
+			var cond_y = page_mouse_y > 0 && page_mouse_y < this.design.get_height();
+
+			if(cond_x && cond_y){
+				this.setActivePage(this.design.pages[i]);
+				break;
+			}
+		}
+	}
+
+	validate_mouse_event(event){
+		var doms_to_consider
+		if(this.interface_dom){
+			doms_to_consider = [this.interface_dom].concat(this.design.pages.map(o => o.dom));
+		}else{
+			doms_to_consider = [this.interface_dom].concat(this.design.pages.map(o => o.dom));
+		}
+
+		var contains = false
+		for(var i=0;i<doms_to_consider.length;i++){
+			if(doms_to_consider[i].contains(event.target)){
+				this.findActivePage(event);
+				contains = true;
+			}
+		}
+
+		return contains
+	}
+
+	mouseDownControl(event){
+		if(!this.validate_mouse_event(event)){
+			return
+		}
+
+		var scope = this;
+		if(scope.present_index != null){
+			return;
+		}
+		// event.preventDefault();
+		// event.stopPropagation();
+		this.mouseDown = true;
+		this.objectMoved = false;
+		this.areaMoved = false;
+
+		this.cropFillGapChanges = {}
+		if(event.type == "touchstart"){
+			this.rawMouseX = event.touches[0].pageX;
+			this.rawMouseY = event.touches[0].pageY;
+
+			this.mouseX = (event.touches[0].pageX - $(scope.active_page.dom).offset().left) * scope.design.cmPerPixel;
+			this.mouseY = (event.touches[0].pageY - $(scope.active_page.dom).offset().top) * scope.design.cmPerPixel;
+		}else{
+			this.rawMouseX = event.pageX;
+			this.rawMouseY = event.pageY;
+
+			this.mouseX = (event.pageX - $(scope.active_page.dom).offset().left) * scope.design.cmPerPixel;
+			this.mouseY = (event.pageY - $(scope.active_page.dom).offset().top) * scope.design.cmPerPixel;
+		}
+
+		this.lastX = this.rawMouseX;
+		this.lastY = this.rawMouseY; 
+
+		if(event.which == 3 || event.button == 2){
+			this.rightClick = true;
+			this.leftClick = false;
+		}else if(event.which == 1 || event.button == 0){
+			this.rightClick = false;
+			this.leftClick = true;
+		}
+		this.mouseDown = true;
+		this.initialMouseX = this.mouseX;
+		this.initialMouseY = this.mouseY;
+
+		if(this.leftClick && scope.mode != 'crop'){
+			scope.setSelection(scope.activeElement,event.shiftKey||event.ctrlKey||event.metaKey);
+		}
+
+		if(scope.mode == 'crop' && scope.selection){
+			if(scope.selection.object.get_parent('grid')){
+				scope.initialObject = scope.selection.object.get_parent('grid').save();
+			}else if(scope.selection.object.getGroup()){
+				scope.initialObject = scope.selection.object.getGroup().save();
+			}else{
+				scope.initialObject = scope.selection.object.save();
+			}
+		}
+	}
+
+
+	mouseUpControl(event){
+		if(!this.validate_mouse_event(event)){
+			return
+		}
+
+		var last_mouseup_timer = this.mouseUpTimer
+		this.mouseUpTimer = performance.now();
+
+		var mouse_double_clicked = false;
+		if(last_mouseup_timer && (this.mouseUpTimer - last_mouseup_timer)<300){
+			mouse_double_clicked = true;
+		}
+
+		var scope = this;
+		if(scope.present_index != null){
+			return;
+		}
+
+		if(scope.area_selection && this.areaMoved){
+			var overlapped_objects = []
+			var area_vertices = [
+				{x: scope.area_selection.start.x,y:scope.area_selection.start.y},
+				{x: scope.area_selection.end.x,y:scope.area_selection.start.y},
+				{x: scope.area_selection.end.x,y:scope.area_selection.end.y},
+				{x: scope.area_selection.start.x,y:scope.area_selection.end.y}
+			]
+			for (var i = 0; i < scope.active_page.objects.length; i++) {
+				if(!scope.active_page.objects[i].getGroup() && 
+					(
+						utils.polygonPolygonIntersect(area_vertices,scope.active_page.objects[i].getVertices()) ||
+						utils.polygonInsidePolygon(scope.active_page.objects[i].getVertices(), area_vertices)
+					)
+				){
+					overlapped_objects.push(scope.active_page.objects[i])
+				}
+			}
+
+			for (var i = 0; i < scope.active_page.groups.length; i++) {
+				if(
+					utils.polygonPolygonIntersect(area_vertices,scope.active_page.groups[i].getVertices()) ||
+					utils.polygonInsidePolygon(scope.active_page.groups[i].getVertices(), area_vertices)
+				){
+					overlapped_objects.push(scope.active_page.groups[i])
+				}
+			}
+
+			if(overlapped_objects.length>0){
+				scope.setAreaSelection(overlapped_objects)
+			}
+		}
+
+		scope.area_selection = null;
+
+		if(scope.mode != 'crop' && this.objectMoved && scope.activeElement && scope.activeElement.object.type=='image' && scope.activeElement.object.sub_type!='icon' && this.mouseDown){
+			var box = scope.overlappedGridBox(this.mouseX,this.mouseY)
+			if(box && !box.get_parent('grid').locked){
+				if(box.image && box.image.dom && box.image.dom.parentElement){
+					box.image.dom.parentElement.removeChild(box.image.dom);
+				}
+				box.image = box.hover_attach
+				box.image.master = box;
+				box.image.image_details.image_needs_autoset = true
+				this.design.loaded_images[box.image.image_cache_id()] = this.design.loaded_images[scope.activeElement.object.image_cache_id()];
+
+				delete box.hover_attach
+				delete scope.activeElement.object.hover_attach
+
+				box.attached_filter = null;
+				scope.activeElement.object.remove();
+				scope.activeElement = null
+				box.get_parent('grid').set_redraw()
+				scope.undo_stack_disabled = false;
+				scope.addUndoChange()
+				this.deselectElements()
+			}
+		}
+
+		if(scope.mode != 'crop' && !this.objectMoved && this.leftClick && scope.activeElement && scope.activeElement.object && scope.lastMouseUpSelection && scope.lastMouseUpSelection.object){
+			var condition = false
+			if(scope.selection.object.type == 'group'){
+				condition = scope.lastMouseUpSelection.object.selected_object && scope.lastMouseUpSelection.object.selected_object.type=='text' && scope.lastMouseUpSelection.object.selected_object == scope.activeElement.object.selected_object
+			}else if(scope.selection.object.type == 'text'){
+				condition = scope.lastMouseUpSelection.object == scope.activeElement.object && scope.lastMouseUpSelection.object.type == 'text'
+			}
+			if(condition){
+				if(scope.selection.object.type == 'group'){
+					var obj = scope.selection.object.selected_object
+				}else{
+					var obj = scope.selection.object	
+				}
+
+				scope.setQuill(obj);
+				
+				// scope.updateTextAreaStyling(obj)
+
+				// $(scope.textarea_dom).off()
+				// var time_temp = setTimeout(function(){
+				// 	$(scope.textarea_dom).val(obj.text_details.text)
+				// 	$(scope.textarea_dom).keyup(function(e){
+				// 		obj.text_details.text = $(scope.textarea_dom).val();
+				// 		obj.set_redraw()
+				// 		scope.needs_redraw = true;
+				// 	})
+				// 	document.body.appendChild(scope.textarea_dom)
+				// 	scope.textarea_dom.focus()
+				// 	clearTimeout(time_temp);
+				// },0)
+			}else{
+				scope.destroyQuill();
+				// if(scope.textarea_dom.parentElement){
+				// 	$(scope.textarea_dom).off()
+				// 	scope.textarea_dom.style.display = 'none'
+				// 	// scope.textarea_dom.parentElement.removeChild(scope.textarea_dom)
+				// }
+			}
+		}else{
+			scope.destroyQuill();
+			// if(scope.textarea_dom.parentElement){
+			// 	$(scope.textarea_dom).off()
+			// 	scope.textarea_dom.style.display = 'none'
+			// 	// scope.textarea_dom.parentElement.removeChild(scope.textarea_dom)
+			// }
+		}
+
+		scope.lastMouseUpSelection = scope.selection;
+		this.mouseDown = false;
+
+		if(!document.getElementById('design_editor_undo_button') || !document.getElementById('design_editor_undo_button').contains(event.target)){
+			scope.addUndoChange()
+		}
+
+		if(scope.snapping_lines_to_draw && scope.snapping_lines_to_draw.length>0){
+			scope.snapping_lines_to_draw = [];
+			scope.needs_redraw = true
+		}
+
+		if(mouse_double_clicked){
+			this.mouseDoubleClickControl(event);
+		}
+
+	}
+
+	mouseDoubleClickControl(event){
+		if(!this.validate_mouse_event(event)){
+			return
+		}
+
+		if(this.present_index != null){
+			return;
+		}
+
+		if(this.leftClick && this.mode != 'crop'){
+			this.findActiveElement();
+			this.setSelection(this.activeElement,event.shiftKey||event.ctrlKey||event.metaKey,true);
+		}
+	}
+
+	mouseMoveControl(event){
+		if(!this.validate_mouse_event(event)){
+			return
+		}
+		
+		var scope = this
+		if(scope.present_index != null){
+			return;
+		}
+		// update mouse
+		if(event.type == "touchmove"){
+			this.rawMouseX = event.touches[0].pageX;
+			this.rawMouseY = event.touches[0].pageY;
+
+			this.mouseX = (event.touches[0].pageX - $(scope.active_page.dom).offset().left) * scope.design.cmPerPixel;
+			this.mouseY = (event.touches[0].pageY - $(scope.active_page.dom).offset().top) * scope.design.cmPerPixel;
+		}else{
+			this.rawMouseX = event.pageX;
+			this.rawMouseY = event.pageY;
+
+			this.mouseX = (event.pageX - $(scope.active_page.dom).offset().left) * scope.design.cmPerPixel;
+			this.mouseY = (event.pageY - $(scope.active_page.dom).offset().top) * scope.design.cmPerPixel;
+		}
+
+		//area_selection
+		if(this.mouseDown && scope.area_selection && this.leftClick){
+			this.areaMoved = true
+			scope.area_selection.end.x = this.mouseX;
+			scope.area_selection.end.y = this.mouseY;
+		}
+
+
+		//dragging and movement
+		if(this.mouseDown && this.leftClick && this.match_active_element_with_selection()
+			&& !scope.activeElement.object.locked && !(scope.activeElement.object.get_parent('grid') && scope.activeElement.object.get_parent('grid').locked) && !(scope.activeElement.object.type == 'group' && scope.activeElement.object.group_details.object_data.find(function(o){return o.object.locked}))
+		){
+			this.objectMoved = true
+			var object = scope.activeElement.object
+
+			if(object.get_parent('box')){
+				object = object.get_parent('grid')
+			}
+
+			if(object.getGroup()){
+				object = object.getGroup()
+			}
+
+			this.destroyQuill();
+
+			scope.updateSnappingLines()
+
+			//resize and cropping
+			if(scope.activeElement.corner){
+				if(['top_left','top_right','bottom_right','bottom_left'].indexOf(scope.activeElement.corner)>-1){
+					scope.resize(object,scope.activeElement.corner,scope.mouseX,scope.mouseY)
+					var snap = scope.checkSnapWithObject(scope.activeElement.object,scope.activeElement.corner,true);
+					if(snap.snapping_line){
+						scope.resize(object,scope.activeElement.corner,scope.mouseX,scope.mouseY,snap.snapping_line)
+					}
+					scope.needs_redraw = true;
+				}else if(['top','right','bottom','left','rotate'].indexOf(scope.activeElement.corner)>-1){
+					scope.cropOrRotate(object,scope.activeElement.corner,scope.mouseX,scope.mouseY)	
+					var snap = scope.checkSnapWithObject(scope.activeElement.object,scope.activeElement.corner,true);
+					if(snap.snapping_line){
+						scope.cropOrRotate(object,scope.activeElement.corner,scope.mouseX,scope.mouseY,snap.snapping_line)
+					}
+					scope.needs_redraw = true;
+				}else if(scope.mode == 'crop' && ['top_left_crop','top_right_crop','bottom_right_crop','bottom_left_crop','top_left_crop_2','top_right_crop_2','bottom_right_crop_2','bottom_left_crop_2'].indexOf(scope.activeElement.corner)>-1){
+					var object_to_crop;
+					if(object.type == 'image' && scope.activeCropImage==object){
+						object_to_crop = object;
+					}else if(object.type == 'grid' && object.grid_details.boxes.find(function(o){return o.image == scope.activeCropImage})){
+						var object_to_crop = scope.activeCropImage;
+						for (var i = 0; i < object.grid_details.boxes.length; i++) {
+							if(object.grid_details.boxes[i].image){
+								object.grid_details.boxes[i].image.width = (object.grid_details.boxes[i].width/100)*object.width
+								object.grid_details.boxes[i].image.height = (object.grid_details.boxes[i].height/100)*object.height
+							}
+						}
+					}
+
+					if(object_to_crop){
+						if(['top_left_crop','top_right_crop','bottom_right_crop','bottom_left_crop'].indexOf(scope.activeElement.corner)>-1){
+							// if()
+						}
+						object_to_crop.cropModeCrop(scope.activeElement.corner,this.mouseX,this.mouseY)
+						scope.needs_redraw = true;
+					}
+				}
+			}else{
+				if(scope.mode == 'crop'){
+					var object_to_crop;var initial_object
+					if(object.type == 'image' && scope.activeCropImage==object){
+						object_to_crop = object;
+						initial_object = scope.initialObject;
+					}else if(object.type == 'grid' && object.grid_details.boxes.find(function(o){return o.image == scope.activeCropImage})){
+						var object_to_crop = scope.activeCropImage;
+						var box_index = _.findIndex(object.grid_details.boxes,function(o){return o.image == object_to_crop});
+						initial_object = scope.initialObject.grid_details.boxes[box_index].image
+						for (var i = 0; i < object.grid_details.boxes.length; i++) {
+							if(object.grid_details.boxes[i].image){
+								object.grid_details.boxes[i].image.width = (object.grid_details.boxes[i].width/100)*object.width
+								object.grid_details.boxes[i].image.height = (object.grid_details.boxes[i].height/100)*object.height
+							}
+						}
+					}
+
+					if(object_to_crop && initial_object){
+						var result = object_to_crop.cropModeMovement((this.mouseX - this.initialMouseX),(this.mouseY - this.initialMouseY),initial_object,this.initialMouseX,this.initialMouseY);
+						this.initialMouseX = result.initialMouseX
+						this.initialMouseY = result.initialMouseY
+						scope.needs_redraw = true;
+					}
+				}else if(object.class_type != 'background'){
+					scope.moveObject(object,scope.initialObject,(this.mouseX - this.initialMouseX),(this.mouseY - this.initialMouseY));
+					scope.needs_redraw = true;
+				}
+			}
+
+			var grids = scope.active_page.objects.filter(function(o){
+				return o.type == 'grid'
+			})
+
+			var images = scope.active_page.objects.filter(function(o){
+				return o.type == 'image'
+			})
+
+			for (var i = 0; i < images.length; i++) {
+				if(images[i].hover_attach){
+					delete images[i].last_style;
+					delete images[i].last_default_style;
+				}
+				delete images[i].hover_attach
+			}
+
+			var overlapped_box;
+			if(object.type == 'image' && object.sub_type!='icon' && object.class_type!='background'){
+				overlapped_box = this.overlappedGridBox(this.mouseX,this.mouseY)
+				if(overlapped_box && overlapped_box.get_parent('grid').locked){
+					overlapped_box = null;
+				}
+			}
+
+			for (var i = 0; i < grids.length; i++) {
+				for(var j=0;j<grids[i].grid_details.boxes.length;j++){
+					if(grids[i].grid_details.boxes[j].hover_attach && grids[i].grid_details.boxes[j] != overlapped_box){
+						grids[i].grid_details.boxes[j].attached_filter = null;
+						if(grids[i].grid_details.boxes[j].hover_attach.dom && grids[i].grid_details.boxes[j].hover_attach.dom.parentElement && grids[i].grid_details.boxes[j].hover_attach.dom.parentElement == grids[i].grid_details.boxes[j].dom){
+							grids[i].grid_details.boxes[j].dom.removeChild(grids[i].grid_details.boxes[j].hover_attach.dom);
+						}
+						delete grids[i].grid_details.boxes[j].hover_attach
+
+						grids[i].set_redraw()
+					}
+				}
+			}
+			
+
+			if(object.type == 'image' && object.sub_type!='icon' && object.class_type!='background'){
+				if(overlapped_box){
+					scope.undo_stack_disabled = true;
+					if(!overlapped_box.hover_attach){
+						var copy_struct = object.copy();
+						copy_struct.id = object.id;
+						var copy_obj = new DM_Image();
+						copy_obj.load(copy_struct);
+						copy_obj.image_details.image_needs_autoset = true
+						
+						// if(overlapped_box.hover_attach){
+						// 	//removing existing attach
+						// 	if(overlapped_box.hover_attach.dom && overlapped_box.hover_attach.dom.parentElement && overlapped_box.hover_attach.dom.parentElement == overlapped_box.dom){
+						// 		overlapped_box.dom.removeChild(overlapped_box.hover_attach.dom);
+						// 	}
+						// 	delete overlapped_box.hover_attach
+						// }
+						
+						copy_obj.master = overlapped_box;
+						overlapped_box.hover_attach = copy_obj;
+					}
+					object.hover_attach = overlapped_box;
+					overlapped_box.attached_filter = object.image_details.filter
+					overlapped_box.get_parent('grid').set_redraw()
+					
+				}else{
+					scope.undo_stack_disabled = false;
+				}
+			}
+		}
+
+		this.lastX = this.rawMouseX;
+		this.lastY = this.rawMouseY; 
+
+		this.lastMouseX = this.mouseX;
+		this.lastMouseY = this.mouseY; 
+
+		if(!this.mouseDown){
+			scope.findActiveElement();
+		}
+
+		scope.needs_redraw = true
+	}
+
+	handleWindowResize() {
+		this.design.handleWindowResize()
+
+		this.needs_redraw = true;
+	}
+
+	updateTextAreaStyling(obj){
+		// obj.dom.contentEditable = "true";
+
+		var scope = this;
+		var top_vertex = obj.getUnrotatedVertices()[0]
+		this.textarea_dom.style.display = 'block';
+		this.textarea_dom.style.left = ($(scope.active_page.dom).offset().left + (scope.design.convertCmToPixel(top_vertex.x))) + 'px';
+		this.textarea_dom.style.top = ($(scope.active_page.dom).offset().top + (scope.design.convertCmToPixel(top_vertex.y))) + 'px';
+		this.textarea_dom.style.width = (scope.design.convertCmToPixel(obj.width)) + 'px';
+		this.textarea_dom.style.height = (scope.design.convertCmToPixel(obj.height)) + 'px';
+		var rotation = (obj.rotation*180/Math.PI)
+		this.textarea_dom.style.transform =  'rotate('+rotation+'deg)';
+
+		this.textarea_dom.style.fontSize = scope.design.convertCmToPixel(Number(obj.text_details.fontSize))+'px'
+		this.textarea_dom.style.lineHeight = (scope.design.convertCmToPixel(1.2*Number(obj.text_details.fontSize) + Number(obj.text_details.lineHeight) ))+'px'
+		this.textarea_dom.style.fontFamily = obj.text_details.font
+		this.textarea_dom.style.wordBreak = 'break-word'
+		this.textarea_dom.style.letterSpacing = scope.design.convertCmToPixel(obj.text_details.letterSpacing) + 'px'
+		this.textarea_dom.style.whiteSpace = 'pre-line';
+
+		if(obj.text_details.bold){
+			this.textarea_dom.style.fontWeight = 'bold'
+		}else{
+			this.textarea_dom.style.fontWeight = 'normal'
+		}
+
+		if(obj.text_details.italic){
+			this.textarea_dom.style.fontStyle = 'italic'
+		}else{
+			this.textarea_dom.style.fontStyle = 'normal'
+		}
+
+		this.textarea_dom.style.textAlign = obj.text_details.textAlign;
+		this.textarea_dom.style.color = 'rgba(0,0,0,0)'
+		// this.textarea_dom.style.color = 'pink'
+		this.textarea_dom.style.caretColor = obj.text_details.fontColor
+	}
+
+	drawAreaSelection(){
+		var scope = this;
+
+		if(scope.area_selection && scope.mode != "crop" && scope.design.convertCmToPixel(utils.distance(scope.area_selection.start.x, scope.area_selection.start.y, scope.area_selection.end.x, scope.area_selection.end.y)) > 5 ){
+			scope.area_selection_dom.style.border = '1px solid #fc6d1a';
+			scope.area_selection_dom.style.backgroundColor = 'rgba(252,110,26,0.4)';
+			
+			var pos = {x:scope.area_selection.start.x,y:scope.area_selection.start.y}
+			var width = Math.abs(scope.design.convertCmToPixel(scope.area_selection.end.x) - scope.design.convertCmToPixel(scope.area_selection.start.x));
+			var height = Math.abs(scope.design.convertCmToPixel(scope.area_selection.end.y) - scope.design.convertCmToPixel(scope.area_selection.start.y));
+			if(scope.area_selection.start.x > scope.area_selection.end.x){
+				pos.x = scope.area_selection.end.x
+			}
+
+			if(scope.area_selection.start.y > scope.area_selection.end.y){
+				pos.y = scope.area_selection.end.y
+			}
+
+			scope.area_selection_dom.style.left = ($(scope.active_page.dom).offset().left + scope.design.convertCmToPixel(pos.x) - $(scope.interface_dom).offset().left) + 'px';
+			scope.area_selection_dom.style.top = ($(scope.active_page.dom).offset().top + scope.design.convertCmToPixel(pos.y) - $(scope.interface_dom).offset().top) + 'px';
+			scope.area_selection_dom.style.width = width + 'px';
+			scope.area_selection_dom.style.height = height + 'px';
+			scope.area_selection_dom.style.display = 'block';
+		}else{
+			scope.area_selection_dom.style.display = 'none'
+		}
+	}
+
+	drawSnappingLines(){
+		var scope = this;
+
+		this.snapping_lines_dom.innerHTML = '';
+
+		if(scope.snapping_lines_to_draw){
+			for (var i = 0; i < scope.snapping_lines_to_draw.length; i++) {
+				var current_line = document.createElement('div');
+				
+				if(scope.snapping_lines_to_draw[i][2]){
+					current_line.style.borderTop = '1px dotted #fc6d1a';
+				}else{
+					current_line.style.borderTop = '1px solid #fc6d1a';
+				}
+
+				var current_points = [scope.snapping_lines_to_draw[i][0],scope.snapping_lines_to_draw[i][1]];
+
+				current_line.style.position = "absolute"
+
+				current_line.style.width = scope.design.convertCmToPixel(utils.distance(current_points[0].x,current_points[0].y,current_points[1].x,current_points[1].y)) + 'px';
+				current_line.style.height = 0;
+
+				var angle = Math.atan2(current_points[1].y - current_points[0].y,current_points[1].x - current_points[0].x);
+				var unrotated_points = this.rotateVertices(current_points,-angle);
+
+				var angle_deg = angle*(180/Math.PI);
+
+				current_line.style.left = ($(scope.active_page.dom).offset().left + scope.design.convertCmToPixel(unrotated_points[0].x) - $(scope.interface_dom).offset().left) + 'px';
+				current_line.style.top = ($(scope.active_page.dom).offset().top + scope.design.convertCmToPixel(unrotated_points[0].y) - $(scope.interface_dom).offset().top) + 'px';
+				current_line.style.transform =  'rotate('+angle_deg+'deg)';
+
+				this.snapping_lines_dom.appendChild(current_line);
+			}
+		}
+	}
+
+	match_active_element_with_selection(){
+		if(this.activeElement && this.activeElement.object && this.selection && this.selection.object){
+			var cond0 = this.activeElement.object == this.selection.object;
+			var cond1 = this.activeElement.object.getGroup() && this.activeElement.object.getGroup() == this.selection.object.getGroup()
+			var cond2 = this.activeElement.object.get_parent('grid') && this.activeElement.object.get_parent('grid') == this.selection.object.get_parent('grid')
+			
+			return cond0 || cond1 || cond2;
+		}
+
+		return false;
+	}
+
+	drawBoxFromObject(obj,draw_corners,stroke_style){
+		var scope = this
+		var obj_page = obj.get_parent('page');
+		var obj_design = obj.get_parent('design');
+
+		var dom_position, dom_width, dom_height, dom_rotation;
+		dom_position = obj.getUnrotatedVertices()[0];
+		if(obj.get_parent('box')){
+			dom_width = obj.get_parent('box').width*obj.get_parent('grid').width/100;
+			dom_height = obj.get_parent('box').height*obj.get_parent('grid').height/100;
+			dom_rotation = obj.get_parent('grid').rotation;
+		}else{
+			dom_width = obj.width;
+			dom_height = obj.height;
+			dom_rotation = obj.rotation;
+		}
+
+		var active_div = document.createElement('div');
+		active_div.style.position = 'absolute';
+
+		var active_div_width = obj_design.convertCmToPixel(dom_width);
+		var active_div_height = obj_design.convertCmToPixel(dom_height);
+
+		active_div.style.left = ($(obj_page.dom).offset().left + obj_design.convertCmToPixel(dom_position.x) - $(scope.interface_dom).offset().left) + 'px';
+		active_div.style.top = ($(obj_page.dom).offset().top + obj_design.convertCmToPixel(dom_position.y) - $(scope.interface_dom).offset().top) + 'px';
+		active_div.style.width = active_div_width + 'px';
+		active_div.style.height = active_div_height + 'px';
+		var angle = dom_rotation*(180/Math.PI);
+		active_div.style.transform =  'rotate('+angle+'deg)';
+		active_div.style.border = "solid 2px "+stroke_style;
+
+		if(draw_corners){
+			var rad_tl=6*1.5;var rad_tr=6*1.5;var rad_br=6*1.5;var rad_bl=6*1.5;
+			var rad_rotate=8*1.5
+			var rad_t=4*1.5;var rad_r=4*1.5;var rad_b=4*1.5;var rad_l=4*1.5;
+			var length_tl_crop=14*1.5;var length_tr_crop=14*1.5;var length_br_crop=14*1.5;var length_bl_crop=14*1.5;
+			var breadth_tl_crop=4*1.5;var breadth_tr_crop=4*1.5;var breadth_br_crop=4*1.5;var breadth_bl_crop=4*1.5;
+			var rad_tl_crop_2=6*1.5;var rad_tr_crop_2=6*1.5;var rad_br_crop_2=6*1.5;var rad_bl_crop_2=6*1.5;
+
+			if(this.match_active_element_with_selection() && scope.activeElement.corner){
+				if(scope.activeElement.corner =='top_left'){
+					rad_tl = 9*1.5
+				}else if(scope.activeElement.corner =='top_right'){
+					rad_tr = 9*1.5
+				}else if(scope.activeElement.corner =='bottom_right'){
+					rad_br = 9*1.5
+				}else if(scope.activeElement.corner =='bottom_left'){
+					rad_bl = 9*1.5
+				}else if(scope.activeElement.corner =='top'){
+					rad_t = 6*1.5
+				}else if(scope.activeElement.corner =='right'){
+					rad_r = 6*1.5
+				}else if(scope.activeElement.corner =='bottom'){
+					rad_b = 6*1.5
+				}else if(scope.activeElement.corner =='left'){
+					rad_l = 6*1.5
+				}else if(scope.activeElement.corner =='rotate'){
+					rad_rotate = 12*1.5
+				}else if(scope.activeElement.corner =='top_left_crop'){
+					length_tl_crop = 21*1.5;
+					breadth_tl_crop = 6*1.5;
+				}else if(scope.activeElement.corner =='top_right_crop'){
+					length_tr_crop = 21*1.5;
+					breadth_tr_crop = 6*1.5;
+				}else if(scope.activeElement.corner =='bottom_right_crop'){
+					length_br_crop = 21*1.5;
+					breadth_br_crop = 6*1.5;
+				}else if(scope.activeElement.corner =='bottom_left_crop'){
+					length_bl_crop = 21*1.5;
+					breadth_bl_crop = 6*1.5;
+				}else if(scope.activeElement.corner =='top_left_crop_2'){
+					rad_tl_crop_2 = 9*1.5
+				}else if(scope.activeElement.corner =='top_right_crop_2'){
+					rad_tr_crop_2 = 9*1.5
+				}else if(scope.activeElement.corner =='bottom_right_crop_2'){
+					rad_br_crop_2 = 9*1.5
+				}else if(scope.activeElement.corner =='bottom_left_crop_2'){
+					rad_bl_crop_2 = 9*1.5
+				}
+			}
+
+			if(obj.height < 40 || obj.width < 40){
+				rad_tl /= 2;
+				rad_tr /= 2;
+				rad_br /= 2;
+				rad_bl /= 2;
+				rad_t /= 2;
+				rad_b /= 2;
+				rad_l /= 2;
+				rad_r /= 2;
+			}
+
+
+			if(this.mode != 'crop'){
+				this.createCircleDiv(
+					0,
+					0,
+					rad_tl,
+					true,'#ffffff',
+					true,'#000000',1,active_div
+				);
+
+				this.createCircleDiv(
+					active_div_width,
+					0,
+					rad_tr,
+					true,'#ffffff',
+					true,'#000000',1,active_div
+				);
+
+				this.createCircleDiv(
+					active_div_width,
+					active_div_height,
+					rad_br,
+					true,'#ffffff',
+					true,'#000000',1,active_div
+				);
+
+				this.createCircleDiv(
+					0,
+					active_div_height,
+					rad_bl,
+					true,'#ffffff',
+					true,'#000000',1,active_div
+				);
+
+				if(obj.type!="text" && !(obj.type == 'grid' && obj.sub_type=='frame') && !(obj.type=='group' && _.findIndex(obj.group_details.object_data,function(o){return o.object.type=='text' || (o.object.type == 'grid' && o.object.sub_type=='frame')})>-1 ) ){
+					this.createRoundRectangleDiv(
+						{
+							x: 0,
+							y: 0
+						},
+						{
+							x: active_div_width,
+							y: 0
+						},
+						rad_t,active_div
+					);
+
+					this.createRoundRectangleDiv(
+						{
+							x: active_div_width,
+							y: active_div_height
+						},
+						{
+							x: 0,
+							y: active_div_height
+						},
+						rad_b,active_div
+					);
+				}
+	
+				if(!(obj.type == 'grid' && obj.sub_type=='frame') && !(obj.type=='group' && _.findIndex(obj.group_details.object_data,function(o){return o.object.type == 'grid' && o.object.sub_type=='frame'})>-1 )){
+					this.createRoundRectangleDiv(
+						{
+							x: active_div_width,
+							y: 0
+						},
+						{
+							x: active_div_width,
+							y: active_div_height
+						},
+						rad_r,active_div
+					);
+
+					this.createRoundRectangleDiv(
+						{
+							x: 0,
+							y: active_div_height
+						},
+						{
+							x: 0,
+							y: 0
+						},
+						rad_l,active_div
+					);
+				}
+	
+				if(scope.rotate_svg){
+					this.createRotationDiv(
+						static_file_server_path + "uploads/refresh.svg",
+						active_div_width/2,
+						active_div_height + obj_design.convertCmToPixel(40),
+						rad_rotate,
+						true,'#ffffff',
+						true,'#000000',1,active_div
+					);	
+					
+	
+					// if(scope.activeElement && scope.activeElement.corner == 'rotate'){
+					// 	context.fillStyle = '#000000'
+					// 	context.font = "normal "+Math.ceil(scope.design.convertCmToPixel(16))+"px Arial";
+					// 	context.fillText((obj.rotation*180/Math.PI).toFixed(0)+'˚', scope.convertX(rotation_vertex.x+25),scope.convertY(rotation_vertex.y+25));
+					// }
+	
+					// context.drawImage(scope.rotate_svg,scope.convertX(rotation_vertex.x)-0.6*(rad_rotate),scope.convertY(rotation_vertex.y)-0.6*(rad_rotate),1.2*rad_rotate,1.2*rad_rotate)
+				}
+			}else {
+				var image_match = false;
+				var draw_circles = false;
+				var draw_crop_handles = false
+				var image_vertices;
+				var vertices;
+				var rotation_origin = obj.getCenter();
+
+				if(obj.type == 'grid'){
+					var box = obj.grid_details.boxes.find(function(o){return o.image == scope.activeCropImage})
+					if(box){
+						image_match = true;
+						draw_circles = true;
+						draw_crop_handles = false;
+						image_vertices = box.getImageCropVertices();
+						var grid_vertices = obj.getVertices();
+						
+						image_vertices = scope.rotateVertices(image_vertices,-obj.rotation,rotation_origin);		
+						grid_vertices = scope.rotateVertices(grid_vertices,-obj.rotation,rotation_origin);
+
+						image_vertices[0].x -= grid_vertices[0].x;
+						image_vertices[0].y -= grid_vertices[0].y;
+						image_vertices[1].x -= grid_vertices[0].x;
+						image_vertices[1].y -= grid_vertices[0].y;
+						image_vertices[2].x -= grid_vertices[0].x;
+						image_vertices[2].y -= grid_vertices[0].y;
+						image_vertices[3].x -= grid_vertices[0].x;
+						image_vertices[3].y -= grid_vertices[0].y;
+
+						image_vertices.map(o => {
+							o.x = obj_design.convertCmToPixel(o.x)
+							o.y = obj_design.convertCmToPixel(o.y)
+						})
+					}
+				}else if(obj.type == 'image' && obj == scope.activeCropImage){
+					image_vertices = obj.getImageCropVertices();
+					vertices = obj.getVertices();
+					
+					image_vertices = scope.rotateVertices(image_vertices,-obj.rotation,rotation_origin);
+					vertices = scope.rotateVertices(vertices,-obj.rotation,rotation_origin);
+
+					image_vertices[0].x -= vertices[0].x;
+					image_vertices[0].y -= vertices[0].y;
+					image_vertices[1].x -= vertices[0].x;
+					image_vertices[1].y -= vertices[0].y;
+					image_vertices[2].x -= vertices[0].x;
+					image_vertices[2].y -= vertices[0].y;
+					image_vertices[3].x -= vertices[0].x;
+					image_vertices[3].y -= vertices[0].y;
+
+					vertices[1].x -= vertices[0].x;
+					vertices[1].y -= vertices[0].y;
+					vertices[2].x -= vertices[0].x;
+					vertices[2].y -= vertices[0].y;
+					vertices[3].x -= vertices[0].x;
+					vertices[3].y -= vertices[0].y;
+					vertices[0].x -= vertices[0].x;
+					vertices[0].y -= vertices[0].y;
+
+					vertices.map(o => {
+						o.x = obj_design.convertCmToPixel(o.x)
+						o.y = obj_design.convertCmToPixel(o.y)
+					})
+
+					image_vertices.map(o => {
+						o.x = obj_design.convertCmToPixel(o.x)
+						o.y = obj_design.convertCmToPixel(o.y)
+					})
+
+					
+
+					if(obj.class_type == 'background'){
+						image_match = true;
+						draw_circles = true;
+						draw_crop_handles = false;
+					}else{
+						image_match = true;
+						draw_circles = true;
+						draw_crop_handles = true;
+					}
+				}
+
+				if(image_match){
+					if(draw_crop_handles){
+						this.createCropDiv(
+							vertices[0].x,
+							vertices[0].y,
+							length_tl_crop,
+							0,active_div
+						);
+
+						this.createCropDiv(
+							vertices[1].x,
+							vertices[1].y,
+							length_tr_crop,
+							Math.PI/2,active_div
+						);
+
+						this.createCropDiv(
+							vertices[2].x,
+							vertices[2].y,
+							length_br_crop,
+							Math.PI,active_div
+						);
+
+						this.createCropDiv(
+							vertices[3].x,
+							vertices[3].y,
+							length_bl_crop,
+							-Math.PI/2,active_div
+						);
+					}
+
+					if(draw_circles){
+						if(!(obj.type == "image" && Math.abs(image_vertices[0].x - vertices[0].x)<3 && Math.abs(image_vertices[0].y - vertices[0].y)<3)){
+							this.createCircleDiv(
+								image_vertices[0].x,
+								image_vertices[0].y,
+								rad_tl_crop_2,
+								true,'#ffffff',
+								true,'#000000',1,active_div
+							);
+						}
+
+						if(!(obj.type == "image" && Math.abs(image_vertices[1].x - vertices[1].x)<3 && Math.abs(image_vertices[1].y - vertices[1].y)<3)){
+							this.createCircleDiv(
+								image_vertices[1].x,
+								image_vertices[1].y,
+								rad_tr_crop_2,
+								true,'#ffffff',
+								true,'#000000',1,active_div
+							);
+						}
+
+						if(!(obj.type == "image" && Math.abs(image_vertices[2].x - vertices[2].x)<3 && Math.abs(image_vertices[2].y - vertices[2].y)<3)){
+							this.createCircleDiv(
+								image_vertices[2].x,
+								image_vertices[2].y,
+								rad_br_crop_2,
+								true,'#ffffff',
+								true,'#000000',1,active_div
+							);
+						}
+
+						if(!(obj.type == "image" && Math.abs(image_vertices[3].x - vertices[3].x)<3 && Math.abs(image_vertices[3].y - vertices[3].y)<3)){
+							this.createCircleDiv(
+								image_vertices[3].x,
+								image_vertices[3].y,
+								rad_bl_crop_2,
+								true,'#ffffff',
+								true,'#000000',1,active_div
+							);
+						}
+					}
+				}
+			}
+		}
+
+
+		this.selection_dom.appendChild(active_div);
+	}
+
+	createCircleDiv(x,y,radius,fill,fillColor,stroke,strokeColor,strokeWidth, active_div){
+		var div = document.createElement('div');
+		div.style.position = 'absolute';
+		div.style.zIndex = 1000000;
+		if(stroke){
+			div.style.border = strokeWidth + 'px solid '+strokeColor;
+		}
+
+		if(fill){
+			div.style.backgroundColor = fillColor
+		}
+
+		div.style.width = 2*radius + 'px';
+		div.style.height = 2*radius + 'px';
+		div.style.left = x-radius + 'px';
+		div.style.top = y-radius + 'px';
+		div.style.borderRadius = radius + 'px';
+		active_div.appendChild(div);
+		return div
+	}
+
+	createCropDiv(x,y,size, angle, active_div){
+		var div = document.createElement('div');
+		div.innerHTML = this.crop_mode_handle;
+		div.style.position = 'absolute';
+		div.style.zIndex = 1000000;
+		
+		div.style.width = size + 'px';
+		div.style.height = size + 'px';
+		div.style.left = (x - (size/2)) + 'px';
+		div.style.top = (y - (size/2)) + 'px';
+		div.style.transform =  'rotate('+(angle*180/Math.PI)+'deg)';
+		active_div.appendChild(div);
+		return div
+	}
+
+	createRotationDiv(src,x,y,radius,fill,fillColor,stroke,strokeColor,strokeWidth,active_div){
+		var div = document.createElement('img');
+		div.setAttribute('draggable', false);
+		div.style.userSelect = 'none'
+
+		div.style.padding = '2px'
+
+
+		div.src = src;
+		div.style.position = 'absolute';
+		div.style.zIndex = 1000000;
+		if(stroke){
+			div.style.border = strokeWidth + 'px solid '+strokeColor;
+		}
+
+		if(fill){
+			div.style.backgroundColor = fillColor
+		}
+
+		div.style.width = 2*radius + 'px';
+		div.style.height = 2*radius + 'px';
+		div.style.left = x-radius + 'px';
+		div.style.top = y-radius + 'px';
+		div.style.borderRadius = radius + 'px';
+
+		active_div.appendChild(div);
+
+		return div
+	}
+
+	createRoundRectangleDiv(p1,p2,radius, active_div){
+		var center = {x: (p1.x+p2.x)/2,y: (p1.y+p2.y)/2};
+		var angle = Math.atan2(p2.y-p1.y,p2.x-p1.x);
+
+		var length = 4*radius
+		var breadth = 2*radius
+
+		var div = document.createElement('div');
+		div.style.position = 'absolute';
+		div.style.zIndex = 1000000;
+		div.style.border = '1px solid black';
+		div.style.backgroundColor = "#ffffff";
+
+		div.style.transform =  'rotate('+(angle*180/Math.PI)+'deg)';
+
+		div.style.width = length + 'px';
+		div.style.height = breadth+'px';
+		div.style.left = center.x-(length/2) + 'px';
+		div.style.top = center.y-(breadth/2) + 'px';
+		div.style.borderRadius = radius + 'px';
+
+		active_div.appendChild(div);
+		return div;
+	}
+
+	drawSelectionBoxes(){
+		var scope = this;
+		this.selection_dom.innerHTML = '';
+		if(scope.selection && !(scope.selection.object.class_type == "text" && scope.selection.object.editor_being_used)){
+			var obj = scope.selection.object;
+			if(obj.getGroup()){
+				this.drawBoxFromObject(obj,false,'#fc6d1a');
+				this.drawBoxFromObject(obj.getGroup(),!obj.getGroup().locked,'#FF841F');
+			}else if(obj.get_parent('box')){
+				this.drawBoxFromObject(obj.get_parent('box'),false,'#fc6d1a');
+				this.drawBoxFromObject(obj.get_parent('grid'),!obj.get_parent('grid').locked,'#FF841F');
+			}else if(obj.class_type == 'background'){
+				this.drawBoxFromObject(obj,scope.mode == "crop",'#FF841F');
+			}else if(!(obj.type == 'image' && obj.hover_attach)){
+				this.drawBoxFromObject(obj,!obj.locked,'#FF841F');
+			}
+		}
+
+		if(scope.activeElement && !(scope.selection && scope.selection.object == scope.activeElement.object) && !(scope.activeElement.object.class_type == "text" && scope.activeElement.object.editor_being_used)){
+			var obj = scope.activeElement.object;
+			if(obj.getGroup()){
+				this.drawBoxFromObject(obj,false,'#FF841F');
+				this.drawBoxFromObject(obj.getGroup(),false,'#FF841F');
+			}else if(obj.get_parent('box')){
+				this.drawBoxFromObject(obj.get_parent('box'),false,'#FF841F');
+				this.drawBoxFromObject(obj.get_parent('grid'),false,'#FF841F');
+			}else if(obj.class_type == 'background'){
+				this.drawBoxFromObject(obj,false,'#FF841F');
+			}else if(!(obj.type == 'image' && obj.hover_attach)){
+				this.drawBoxFromObject(obj,false,'#FF841F');
+			}
+		}	
+	}
+
+	setDomPositionFromVertices(vertices,dom){
+		var rotation = Math.atan2(vertices[1].y - vertices[0].y,vertices[1].x - vertices[0].x)
+		
+		var unrotated_vertices = this.rotateVertices(vertices,-rotation);
+		//angle multiplier and base transform written to handle conflict with flip image 
+
+		var angle_multiplier = 1;
+
+		if(dom.angle_multiplier != undefined){
+			angle_multiplier = dom.angle_multiplier
+		}
+
+		var angle = rotation*(180/Math.PI)*angle_multiplier;
+		if(dom.base_transform){
+			dom.style.transform = dom.base_transform +' ' + 'rotate('+angle+'deg)';
+		}else{
+			dom.style.transform = 'rotate('+angle+'deg)';
+		}
+
+		dom.style.left = unrotated_vertices[0].x + 'px'
+		dom.style.top = unrotated_vertices[0].y + 'px'
+		dom.style.width = (unrotated_vertices[1].x - unrotated_vertices[0].x) + 'px'
+		dom.style.height = (unrotated_vertices[3].y - unrotated_vertices[0].y) + 'px'
+	}
+
+	rotateVertices(vertices,rotation,rotation_origin){
+		if(!rotation_origin){
+			var rotation_origin = {
+				x: 0,
+				y: 0
+			}
+
+			for(var i=0;i<vertices.length;i++){
+				rotation_origin.x += vertices[i].x;
+				rotation_origin.y += vertices[i].y;
+			}
+
+			rotation_origin.x /= vertices.length;
+			rotation_origin.y /= vertices.length;
+		}
+
+		vertices = vertices.map(function(o){
+			return {x:o.x - rotation_origin.x,y: o.y - rotation_origin.y}
+		})
+
+		return vertices.map(function(o){
+			return {
+				x: o.x*Math.cos(rotation) - o.y*Math.sin(rotation) + rotation_origin.x,
+				y: o.x*Math.sin(rotation) + o.y*Math.cos(rotation) + rotation_origin.y
+			}
+		})
+	}
+
+	draw(){
+		var scope = this
+		this.design.draw();
+		this.drawSnappingLines();
+		this.drawAreaSelection();
+
+		if(this.mode == 'crop' && this.activeCropImage && this.crop_mode_dom && this.crop_mode_image){
+			var image_vertices;
+			var vertices;
+			if(this.activeCropImage.get_parent('box')){
+				vertices = this.activeCropImage.get_parent('box').getVertices();
+				image_vertices = this.activeCropImage.get_parent('box').getImageCropVertices();
+			}else{
+				vertices = this.activeCropImage.getVertices();
+				image_vertices = this.activeCropImage.getImageCropVertices();
+			}
+			var page = this.activeCropImage.get_parent('page')
+
+			vertices.map(o => {
+				o.x = page.get_parent('design').convertCmToPixel(o.x);
+				o.y = page.get_parent('design').convertCmToPixel(o.y);
+				o.x += ($(page.dom).offset().left - $(scope.interface_dom).offset().left);
+				o.y += ($(page.dom).offset().top - $(scope.interface_dom).offset().top);
+			})
+
+			image_vertices.map(o => {
+				o.x = page.get_parent('design').convertCmToPixel(o.x);
+				o.y = page.get_parent('design').convertCmToPixel(o.y);
+				o.x += ($(page.dom).offset().left - $(scope.interface_dom).offset().left);
+				o.y += ($(page.dom).offset().top - $(scope.interface_dom).offset().top);
+			})
+
+			this.setDomPositionFromVertices(image_vertices,this.crop_mode_image)
+			this.setDomPositionFromVertices(vertices,this.crop_mode_dom)
+		}
+
+		this.drawSelectionBoxes();
+	}
+}
+
+function resizeCalculator(old_box,new_box){
+	var rc = this
+	var length_ratio = (new_box[1].x - new_box[0].x)/(old_box[1].x - old_box[0].x);
+	
+	this.convertLength = function(length){
+		return length*length_ratio
+	}
+
+	this.convertX = function(x){
+		var x_relative_to_origin = x - old_box[0].x
+		var x_relative_to_origin_to_new_length = rc.convertLength(x_relative_to_origin);
+		return new_box[0].x + x_relative_to_origin_to_new_length
+	}
+
+	this.convertY = function(y){
+		var y_relative_to_origin = y - old_box[0].y
+		var y_relative_to_origin_to_new_length = rc.convertLength(y_relative_to_origin);
+		return new_box[0].y + y_relative_to_origin_to_new_length
+	}
+}
+
+function refresh_ids_struct(design_file_page){
+	design_file_page.id = utils.uuidv4();
+	var id_map = {}
+
+	if(design_file_page.background && design_file_page.background.id){
+		design_file_page.background.id = utils.uuidv4();
+	}
+	
+	for (var i = 0; i < design_file_page.objects.length; i++) {
+		var new_id = utils.uuidv4();
+		id_map[design_file_page.objects[i].id] = new_id
+		design_file_page.objects[i].id = new_id;
+
+		if(design_file_page.objects[i].type == 'grid'){
+			var boxes = design_file_page.objects[i].grid_details.boxes;
+			for(var b=0;b<boxes.length;b++){
+				if(boxes[b].image){
+					var new_id = utils.uuidv4();
+					id_map[boxes[b].image.id] = new_id
+					boxes[b].image.id = new_id;
+				}
+				if(boxes[b].frame){
+					var new_id = utils.uuidv4();
+					id_map[boxes[b].frame.id] = new_id
+					boxes[b].frame.id = new_id;
+				}
+			}
+		}
+	}
+
+	if(design_file_page.groups){
+		for (var i = 0; i < design_file_page.groups.length; i++) {
+			design_file_page.groups[i].id = utils.uuidv4();
+			design_file_page.groups[i].group_details.object_data = design_file_page.groups[i].group_details.object_data.map(function(o){
+				o.object = id_map[o.object];
+			})
+		}
+	}
+}
+
+function refresh_ids_design(page){
+	page.id = utils.uuidv4();
+	var id_map = {}
+	
+	page.background.id = utils.uuidv4();
+	for (var i = 0; i < page.objects.length; i++) {
+		var new_id = utils.uuidv4();
+		id_map[page.objects[i].id] = new_id
+		page.objects[i].id = new_id;
+
+		if(page.objects[i].type == 'grid'){
+			var boxes = page.objects[i].grid_details.boxes;
+			for(var b=0;b<boxes.length;b++){
+				if(boxes[b].image){
+					var new_id = utils.uuidv4();
+					id_map[boxes[b].image.id] = new_id
+					boxes[b].image.id = new_id;
+				}
+				if(boxes[b].frame){
+					var new_id = utils.uuidv4();
+					id_map[boxes[b].frame.id] = new_id
+					boxes[b].frame.id = new_id;
+				}
+			}
+		}
+	}
+
+	for (var i = 0; i < page.groups.length; i++) {
+		page.groups[i].id = utils.uuidv4();
+		page.groups[i].group_details.object_data = page.groups[i].group_details.object_data.map(function(o){
+			o.object.id = id_map[o.object];
+		});
+	}
+}
+
+window.DM_Editor = DM_Editor
+
+function generateGridsRecursively(grids,number_of_grids){
+	if(!grids){
+		grids = [{type:'grid',grid_details: {boxes: [{position:{x:0,y:0},width: 100,height:100}]}}]
+	}
+
+	if(!number_of_grids){
+		number_of_grids = 200
+	}
+
+	if(grids.length>=number_of_grids){
+		return grids
+	}
+
+	var len = grids.length
+	for (var i = 0; i < len; i++) {
+		for (var j = 0; j < grids[i].grid_details.boxes.length; j++) {
+			if(grids.length<number_of_grids){
+				var new_boxes = splitHorizontal(grids[i].grid_details.boxes[j]).concat(
+					grids[i].grid_details.boxes.filter(function(o){return o!= grids[i].grid_details.boxes[j]})
+				)
+				grids.push(
+					{type: 'grid',grid_details:{ boxes:new_boxes }}
+				)
+			}else{
+				return grids
+			}
+
+			if(grids.length<number_of_grids){
+				var new_boxes = splitVertical(grids[i].grid_details.boxes[j]).concat(
+					grids[i].grid_details.boxes.filter(function(o){return o!= grids[i].grid_details.boxes[j]})
+				)
+
+				grids.push(
+					{type: 'grid',grid_details:{ boxes:new_boxes }}
+				)
+			}else{
+				return grids
+			}
+		}		
+	}
+
+	function splitHorizontal(box,ratio){
+		if(!ratio){
+			ratio = 0.5;
+		}
+
+		var box1 = {position:{x:box.position.x,y:box.position.y},width: box.width*ratio,height:box.height}
+		var box2 = {position:{x:box.position.x+box.width*ratio ,y:box.position.y},width: box.width*(1-ratio),height:box.height}
+
+		return [box1,box2]
+	}
+
+	function splitVertical(box,ratio){
+		if(!ratio){
+			ratio = 0.5;
+		}
+
+		var box1 = {position:{x:box.position.x,y:box.position.y},width: box.width,height:box.height*ratio}
+		var box2 = {position:{x:box.position.x ,y:box.position.y+box.height*ratio},width: box.width,height:box.height*(1-ratio)}
+
+		return [box1,box2]
+	}
+		
+
+	return generateGridsRecursively(grids,number_of_grids)
+}
+
+
+function getGridResources(page_no,size){
+	var grids = generateGridsRecursively(undefined,(page_no+1)*size)
+	grids = grids.slice(page_no*size,(page_no+1)*size)
+
+	var grid_resources = []
+	for (var i = 0; i < grids.length; i++) {
+		grid_resources[i] = {}
+		grid_resources[i].src = convertGridToSvg(grids[i])
+		grid_resources[i].design_file = grids[i]
+	}
+
+	return grid_resources
+}
+
+function convertGridToSvg(grid){
+	var ctx = new C2S(100,100);
+
+	ctx.fillStyle = "#fc6d1a";
+	ctx.strokeStyle = "#000000"
+	ctx.lineWidth = 1
+	var boxes = grid.grid_details.boxes;
+
+	for (var i = 0; i < boxes.length; i++) {
+		ctx.fillStyle = "#" + Math.random().toString(16).slice(2, 8)
+		ctx.fillRect(boxes[i].position.x,boxes[i].position.y,boxes[i].width,boxes[i].height);
+
+		ctx.beginPath();
+		ctx.moveTo(b2s(boxes[i].position.x),b2s(boxes[i].position.y));
+		ctx.lineTo(b2s(boxes[i].position.x+boxes[i].width),b2s(boxes[i].position.y));
+		ctx.lineTo(b2s(boxes[i].position.x+boxes[i].width),b2s(boxes[i].position.y+boxes[i].height));
+		ctx.lineTo(b2s(boxes[i].position.x),b2s(boxes[i].position.y+boxes[i].height));
+		ctx.lineTo(b2s(boxes[i].position.x),b2s(boxes[i].position.y));
+		ctx.stroke();
+	}
+
+	function b2s(num){
+		return Math.min(Math.max(0,num),100)
+	}
+
+	var svgString = ctx.getSerializedSvg(true); //true here, if you need to convert named to numbered entities.
+
+	var browser = findBrowser()
+	if(browser == 'safari'){
+		return "data:image/svg+xml;charset=utf-8,"+encodeURIComponent(svgString);
+	}else{
+		var DOMURL = self.URL || self.webkitURL || self;
+		var svg = new Blob([svgString], {type: "image/svg+xml;charset=utf-8"});
+		return DOMURL.createObjectURL(svg);
+	}
+		
+}
+
+//TODO
+/*
+1.0 release
+quill textbox perfection
+multi page design download
+add new page button not working
+crop mode doubleclick
+crop mode relative movement issue and test on grids and background
+bulk edit output formatting
+pre rendering
+animations
+
+wizard open design has no thumbnail by default
+toolbar colorpicker z index issue
+wizard color swap async issue
+folder download all designs
+getStringWidth & getColorBehindText
+selection box overflow bringing a scroll bar
+snapping lines
+text box tumbnail && design template thumbnail
+drag and drop image replacement feedback
+background selection border
+mask bug with K sign
+*/
